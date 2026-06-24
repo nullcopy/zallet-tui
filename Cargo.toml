@@ -1,0 +1,57 @@
+[package]
+name = "zallet-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["nullcopy"]
+license = "MIT OR Apache-2.0"
+description = "An interactive terminal UI for the Zallet Zcash wallet, over its JSON-RPC interface."
+repository = "https://github.com/nullcopy/zallet-tui"
+categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
+keywords = ["zcash", "wallet", "tui", "zallet"]
+
+[dependencies]
+# Terminal UI
+ratatui = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
+qrcode = { version = "0.14", default-features = false }
+
+# RPC client
+jsonrpsee = { version = "0.24", features = ["async-client"] }
+jsonrpsee-http-client = { version = "0.24", default-features = false }
+hyper = "1"
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+futures = "0.3"
+
+# CLI / config
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
+
+# Secrets / encoding
+secrecy = { version = "0.8", features = ["serde"] }
+base64ct = { version = "1.8", features = ["alloc"] }
+
+# Filesystem (platform config-directory discovery)
+home = "0.5"
+
+# i18n
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8"
+unic-langid = "0.9"
+
+# Errors / logging
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Property-based testing for pure helpers (formatting, parsing, log tailing).
+proptest = "1"
+
+[profile.release]
+debug = "line-tables-only"
