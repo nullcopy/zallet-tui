@@ -47,6 +47,13 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) auth: Vec<RpcAuth>,
 
+    /// Path to a Zallet RPC cookie file (`__cookie__:<password>`) to authenticate with.
+    ///
+    /// Takes precedence over the `[[auth]]` entries; re-read on every connection attempt
+    /// because Zallet rewrites the cookie on each startup.
+    #[serde(default)]
+    pub(crate) cookie_file: Option<PathBuf>,
+
     /// The client request timeout, in seconds (`0` means no timeout).
     #[serde(default)]
     pub(crate) timeout: Option<u64>,
@@ -79,6 +86,8 @@ impl Config {
 pub(crate) struct Connection {
     url: String,
     auth: Vec<RpcAuth>,
+    /// A cookie file to read credentials from, taking precedence over `auth`.
+    cookie_file: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -103,26 +112,71 @@ impl Connection {
             .unwrap_or_else(|| DEFAULT_RPC_URL.to_string());
 
         // A `--rpc-user`/`--rpc-password` pair on the command line overrides the configured
-        // `[[auth]]` credentials entirely.
-        let auth = match &cmd.rpc_user {
-            Some(user) => vec![RpcAuth {
-                user: user.clone(),
-                password: cmd.rpc_password.clone().map(SecretString::new),
-            }],
-            None => config.auth.clone(),
+        // `[[auth]]` credentials entirely — including any cookie file. Without one, a
+        // cookie file (CLI over config) is preferred over `[[auth]]` entries.
+        let (auth, cookie_file) = match &cmd.rpc_user {
+            Some(user) => (
+                vec![RpcAuth {
+                    user: user.clone(),
+                    password: cmd.rpc_password.clone().map(SecretString::new),
+                }],
+                None,
+            ),
+            None => (
+                config.auth.clone(),
+                cmd.cookie_file
+                    .clone()
+                    .or_else(|| config.cookie_file.clone()),
+            ),
         };
 
-        Connection { url, auth, timeout }
+        Connection {
+            url,
+            auth,
+            cookie_file,
+            timeout,
+        }
     }
 
     /// Builds a connected [`WalletClient`] for this connection.
+    ///
+    /// The cookie file (when configured) is read here, at connection time, because Zallet
+    /// rewrites it with a fresh credential on every startup.
     pub(crate) fn connect(&self) -> Result<WalletClient> {
-        Ok(WalletClient::connect_remote(
-            &self.url,
-            &self.auth,
-            self.timeout,
-        )?)
+        let cookie_auth = match &self.cookie_file {
+            Some(path) => Some(read_cookie(path)?),
+            None => None,
+        };
+        let auth = match &cookie_auth {
+            Some(auth) => std::slice::from_ref(auth),
+            None => &self.auth,
+        };
+        Ok(WalletClient::connect_remote(&self.url, auth, self.timeout)?)
     }
+}
+
+/// Reads an RPC credential from a Zallet cookie file.
+fn read_cookie(path: &Path) -> Result<RpcAuth> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read cookie file {}", path.display()))?;
+    parse_cookie(&contents)
+        .with_context(|| format!("cookie file {} is not `user:password`", path.display()))
+}
+
+/// Parses the `user:password` line of an RPC cookie file.
+///
+/// The password may itself contain `:`; only the first separator delimits the user. Empty
+/// users or passwords are rejected — Zallet itself refuses empty RPC passwords.
+fn parse_cookie(contents: &str) -> Option<RpcAuth> {
+    let line = contents.lines().next()?.trim();
+    let (user, password) = line.split_once(':')?;
+    if user.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some(RpcAuth {
+        user: user.to_string(),
+        password: Some(SecretString::new(password.to_string())),
+    })
 }
 
 /// The platform-default location for `zallet-tui.toml`.
@@ -145,6 +199,11 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Client request timeout, in seconds. Use 0 for no timeout. Defaults to 900.
 # timeout = 900
+
+# Path to a Zallet RPC cookie file. Zallet writes a fresh `.cookie` (containing
+# `__cookie__:<password>`) into its data directory on every startup; pointing at it here
+# avoids configuring a `[[rpc.auth]]` user by hand. Takes precedence over `[[auth]]`.
+# cookie_file = \"/path/to/zallet/datadir/.cookie\"
 
 # RPC authentication credentials. These must match a `[[rpc.auth]]` user configured in the
 # Zallet server's own config. Repeat the `[[auth]]` block for multiple credentials.
@@ -234,5 +293,32 @@ pub(crate) fn default_log_path() -> PathBuf {
     match log_dir() {
         Some(dir) => dir.join("zallet-tui.log"),
         None => PathBuf::from("zallet-tui.log"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::ExposeSecret as _;
+
+    use super::parse_cookie;
+
+    #[test]
+    fn cookie_parses_user_and_password() {
+        let auth = parse_cookie("__cookie__:sekrit\n").expect("valid cookie");
+        assert_eq!(auth.user, "__cookie__");
+        assert_eq!(auth.password.unwrap().expose_secret(), "sekrit");
+    }
+
+    #[test]
+    fn cookie_password_may_contain_separators() {
+        let auth = parse_cookie("__cookie__:se:kr:it").expect("valid cookie");
+        assert_eq!(auth.password.unwrap().expose_secret(), "se:kr:it");
+    }
+
+    #[test]
+    fn malformed_or_empty_cookies_are_rejected() {
+        for contents in ["", "\n", "nocolon", ":password", "user:", ":"] {
+            assert!(parse_cookie(contents).is_none(), "{contents:?}");
+        }
     }
 }

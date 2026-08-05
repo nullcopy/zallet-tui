@@ -47,6 +47,14 @@ pub(crate) struct TuiCmd {
     #[arg(long, value_name = "PASSWORD")]
     pub(crate) rpc_password: Option<String>,
 
+    /// Path to a Zallet RPC cookie file to authenticate with.
+    ///
+    /// Zallet writes a fresh `.cookie` file (containing `__cookie__:<password>`) into its
+    /// data directory on every startup; pointing at it avoids configuring a `[[rpc.auth]]`
+    /// user by hand. Ignored when `--rpc-user` is given.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) cookie_file: Option<PathBuf>,
+
     /// Path to a `zallet-tui.toml` configuration file.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
