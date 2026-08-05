@@ -309,6 +309,17 @@ impl WalletClient {
         self.request("z_getoperationstatus", rpc_params![[opid]])
             .await
     }
+
+    /// Collects (and thereby removes) one finished async operation.
+    ///
+    /// The wallet's operation queue is bounded: uncollected finished operations become
+    /// eviction candidates once the queue fills, and a queue full of *unfinished*
+    /// operations rejects new sends outright. Collecting each operation once it reaches a
+    /// terminal status keeps the queue clear.
+    pub(crate) async fn operation_result(&self, opid: &str) -> CallResult<Vec<OperationStatus>> {
+        self.request("z_getoperationresult", rpc_params![[opid]])
+            .await
+    }
 }
 
 // --- Response types -------------------------------------------------------------------

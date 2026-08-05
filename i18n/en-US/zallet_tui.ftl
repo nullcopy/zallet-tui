@@ -64,6 +64,7 @@ tui-toast-account-created = Created account '{$name}'
 tui-toast-send-completed = Send completed
 tui-toast-send-cancelled = Send cancelled
 tui-err-send-failed = Send failed: {$error}
+tui-err-send-op-lost = Operation {$opid} is no longer tracked by the wallet; check the Transactions view for the outcome.
 tui-err-unknown = unknown error
 
 # Logs view (toasts / placeholders)

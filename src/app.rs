@@ -804,6 +804,13 @@ impl App {
             other => return self.report_call_error("z_getoperationstatus", other),
         };
         let Some(status) = statuses.pop() else {
+            // The wallet no longer knows this operation: its bounded operation queue can
+            // evict finished (but uncollected) operations, and the queue does not survive
+            // a wallet restart. Polling further would spin forever, so give up and tell
+            // the user to check the transaction list for the outcome.
+            self.send.pending_opid = None;
+            self.send.pending_status = None;
+            self.error(crate::fl!("tui-err-send-op-lost", opid = opid));
             return;
         };
 
@@ -824,6 +831,11 @@ impl App {
                 }
                 _ => self.info(crate::fl!("tui-toast-send-cancelled")),
             }
+            // Collect the finished operation so it does not linger in (and eventually
+            // overflow) the wallet's bounded operation queue. The status in hand already
+            // carries the result, so the response is not needed; failure to collect is
+            // harmless and will resolve on wallet restart.
+            let _ = self.client.operation_result(&opid).await;
         }
         self.send.pending_status = Some(status);
     }
