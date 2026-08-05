@@ -51,10 +51,27 @@ pub(crate) struct RpcError {
 }
 
 impl RpcError {
-    /// Whether this error indicates the wallet must be unlocked before the operation can
-    /// proceed (`LegacyCode::WalletUnlockNeeded`).
+    /// Whether the wallet must be unlocked before the operation can proceed
+    /// (`LegacyCode::WalletUnlockNeeded`).
     pub(crate) fn is_unlock_needed(&self) -> bool {
         self.code == -13
+    }
+
+    /// Whether the supplied passphrase was incorrect (`LegacyCode::WalletPassphraseIncorrect`).
+    pub(crate) fn is_incorrect_passphrase(&self) -> bool {
+        self.code == -14
+    }
+
+    /// Whether the operation is invalid for the wallet's encryption state, e.g. unlocking a
+    /// wallet that is not encrypted (`LegacyCode::WalletWrongEncState`).
+    pub(crate) fn is_wrong_encryption_state(&self) -> bool {
+        self.code == -15
+    }
+
+    /// Whether the wallet is still warming up (scanning/syncing) and cannot answer yet
+    /// (`LegacyCode::InWarmup`).
+    pub(crate) fn is_warming_up(&self) -> bool {
+        self.code == -28
     }
 }
 
@@ -324,6 +341,17 @@ pub(crate) struct Progress {
     pub(crate) denominator: u64,
 }
 
+impl Progress {
+    /// Progress as a fraction in `[0.0, 1.0]`, or `None` when indeterminate.
+    ///
+    /// The denominator can be zero when a scan range contains no shielded notes, in which
+    /// case there is no meaningful ratio to report.
+    pub(crate) fn fraction(&self) -> Option<f64> {
+        (self.denominator != 0)
+            .then(|| (self.numerator as f64 / self.denominator as f64).clamp(0.0, 1.0))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct TotalBalance {
     pub(crate) transparent: String,
@@ -353,15 +381,15 @@ pub(crate) struct AccountBalance {
 impl AccountBalance {
     /// Spendable balance in the transparent pool, in zatoshi.
     pub(crate) fn transparent_zat(&self) -> i64 {
-        spendable(&self.transparent)
+        spendable(self.transparent.as_ref())
     }
     /// Spendable balance in the Sapling pool, in zatoshi.
     pub(crate) fn sapling_zat(&self) -> i64 {
-        spendable(&self.sapling)
+        spendable(self.sapling.as_ref())
     }
     /// Spendable balance in the Orchard pool, in zatoshi.
     pub(crate) fn orchard_zat(&self) -> i64 {
-        spendable(&self.orchard)
+        spendable(self.orchard.as_ref())
     }
 
     /// The account's not-yet-spendable (pending) balance across all pools, in zatoshi.
@@ -375,8 +403,8 @@ impl AccountBalance {
 }
 
 /// The spendable zatoshi in a pool, or `0` if the pool is absent.
-fn spendable(pool: &Option<PoolBalance>) -> i64 {
-    pool.as_ref().map_or(0, PoolBalance::spendable_zat)
+fn spendable(pool: Option<&PoolBalance>) -> i64 {
+    pool.map_or(0, PoolBalance::spendable_zat)
 }
 
 /// A per-pool (or whole-account `total`) balance, keyed by spendability category.

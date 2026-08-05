@@ -23,11 +23,11 @@ pub(crate) async fn on_key(app: &mut App, key: KeyEvent) {
     // While confirming, only y/n are meaningful.
     if app.send.confirming {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.send.confirming = false;
                 submit(app).await;
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.send.confirming = false;
                 app.info(crate::fl!("tui-send-cancelled"));
             }
@@ -197,12 +197,7 @@ async fn submit(app: &mut App) {
         Ok(Err(e)) if e.is_unlock_needed() => {
             app.error(crate::fl!("tui-err-locked-press-u-upper"));
         }
-        Ok(Err(e)) => app.error(crate::fl!(
-            "tui-err-rpc-call",
-            method = "z_sendmany",
-            error = e.to_string()
-        )),
-        Err(e) => app.error(e.to_string()),
+        other => app.report_call_error("z_sendmany", other),
     }
 }
 

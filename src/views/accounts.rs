@@ -22,7 +22,7 @@ pub(crate) struct AccountsState {
     pub(crate) selected: usize,
 }
 
-pub(crate) async fn on_key(app: &mut App, key: KeyEvent) {
+pub(crate) fn on_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => {
             if app.accounts.selected + 1 < app.data.accounts.len() {

@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -82,7 +82,7 @@ fn run(cmd: TuiCmd) -> Result<()> {
 
     // Resolve and build the client connection.
     let config = Config::load(cmd.config.as_deref())?;
-    let connection = Connection::resolve(&cmd, &config)?;
+    let connection = Connection::resolve(&cmd, &config);
     let client = connection.connect()?;
 
     // Run the async UI on a Tokio runtime.
@@ -113,7 +113,7 @@ async fn run_ui(client: client::WalletClient, log_path: Option<PathBuf>) -> Resu
 
 /// Initializes file-based tracing. The TUI cannot log to standard error without corrupting
 /// its display, so all log output goes to `log_path`.
-fn init_logging(log_path: &PathBuf) -> Result<()> {
+fn init_logging(log_path: &Path) -> Result<()> {
     use tracing_subscriber::EnvFilter;
 
     // Ensure the log directory exists (the platform default may not have been created yet).

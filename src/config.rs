@@ -89,7 +89,7 @@ impl Connection {
     /// conventional local RPC endpoint. Authentication uses a configured `[[rpc.auth]]`
     /// user/password: `--rpc-user`/`--rpc-password` take precedence over the `[[auth]]`
     /// entries in the config file.
-    pub(crate) fn resolve(cmd: &TuiCmd, config: &Config) -> Result<Self> {
+    pub(crate) fn resolve(cmd: &TuiCmd, config: &Config) -> Self {
         let timeout = Duration::from_secs(match cmd.timeout.or(config.timeout) {
             Some(0) => u64::MAX,
             Some(t) => t,
@@ -112,7 +112,7 @@ impl Connection {
             None => config.auth.clone(),
         };
 
-        Ok(Connection { url, auth, timeout })
+        Connection { url, auth, timeout }
     }
 
     /// Builds a connected [`WalletClient`] for this connection.

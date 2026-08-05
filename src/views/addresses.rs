@@ -91,12 +91,7 @@ async fn derive_new_address(app: &mut App) {
         Ok(Err(e)) if e.is_unlock_needed() => {
             app.error(crate::fl!("tui-err-locked-press-u-upper"));
         }
-        Ok(Err(e)) => app.error(crate::fl!(
-            "tui-err-rpc-call",
-            method = "z_getaddressforaccount",
-            error = e.to_string()
-        )),
-        Err(e) => app.error(e.to_string()),
+        other => app.report_call_error("z_getaddressforaccount", other),
     }
 }
 
