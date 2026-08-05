@@ -14,7 +14,7 @@ use crate::format::{short_uuid, zec_decimal};
 pub(crate) fn on_key(app: &mut App, key: KeyEvent) {
     match key.code {
         // Adjust minconf with +/- (and the unshifted '=' for convenience).
-        KeyCode::Char('+') | KeyCode::Char('=') => {
+        KeyCode::Char('+' | '=') => {
             app.data.minconf = app.data.minconf.saturating_add(1);
         }
         KeyCode::Char('-') => {

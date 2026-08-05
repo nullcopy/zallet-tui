@@ -64,11 +64,11 @@ fn render_sync_bar(app: &App, frame: &mut Frame<'_>, area: Rect) {
         label.push_str("  ");
         label.push_str(&crate::fl!("tui-sync-tip", node = node));
     }
-    if let Some(remaining) = summary.unscanned_blocks {
-        if remaining > 0 {
-            label.push_str("  ");
-            label.push_str(&crate::fl!("tui-sync-blocks-left", remaining = remaining));
-        }
+    if let Some(remaining) = summary.unscanned_blocks
+        && remaining > 0
+    {
+        label.push_str("  ");
+        label.push_str(&crate::fl!("tui-sync-blocks-left", remaining = remaining));
     }
 
     let ratio = summary.fraction.unwrap_or(0.0);
@@ -157,16 +157,15 @@ fn render_locked(app: &App, frame: &mut Frame<'_>, area: Rect) {
         )),
     ];
 
-    if app.prompt.is_none() {
-        if let Some(toast) = &app.toast {
-            if toast.is_error {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", toast.text),
-                    Style::default().fg(Color::Red),
-                )));
-            }
-        }
+    if app.prompt.is_none()
+        && let Some(toast) = &app.toast
+        && toast.is_error
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", toast.text),
+            Style::default().fg(Color::Red),
+        )));
     }
 
     let paragraph = Paragraph::new(lines)

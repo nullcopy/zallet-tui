@@ -6,8 +6,8 @@ use anyhow::{Context as _, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::client::{
-    Account, Balances, LockState, OperationStatus, TotalBalance, WalletClient, WalletStatus,
-    WalletTx,
+    Account, Balances, CallResult, LockState, OperationStatus, TotalBalance, WalletClient,
+    WalletStatus, WalletTx,
 };
 use crate::event::{Event, EventSource};
 use crate::terminal::Tui;
@@ -285,19 +285,13 @@ impl App {
                 node_height: Some(status.node_tip.height),
                 unscanned_blocks: Some(0),
             },
-            Some(work) => {
-                let p = &work.progress;
-                // The denominator can be zero when a range contains no shielded notes.
-                let fraction = (p.denominator != 0)
-                    .then(|| (p.numerator as f64 / p.denominator as f64).clamp(0.0, 1.0));
-                SyncSummary {
-                    fraction,
-                    synced: false,
-                    synced_height: status.fully_synced_height,
-                    node_height: Some(status.node_tip.height),
-                    unscanned_blocks: Some(work.unscanned_blocks),
-                }
-            }
+            Some(work) => SyncSummary {
+                fraction: work.progress.fraction(),
+                synced: false,
+                synced_height: status.fully_synced_height,
+                node_height: Some(status.node_tip.height),
+                unscanned_blocks: Some(work.unscanned_blocks),
+            },
         }
     }
 
@@ -349,15 +343,11 @@ impl App {
 
     /// Refreshes the wallet's encryption/lock state from `getwalletinfo`.
     pub(crate) async fn refresh_lock_state(&mut self) {
+        // On any error, the lock state is left unchanged: it stays at its conservative
+        // initial value (`Locked`) until the backend tells us otherwise.
         match self.client.get_wallet_info().await {
             Ok(Ok(info)) => self.lock_state = info.lock_state(),
-            // If we can't determine the state, remain conservative: stay locked.
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "getwalletinfo",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
+            other => self.report_call_error("getwalletinfo", other),
         }
     }
 
@@ -389,6 +379,24 @@ impl App {
         });
     }
 
+    /// Reports a failed RPC `result` as an error toast.
+    ///
+    /// A wallet-level error is annotated with the failing `method`; a transport error
+    /// carries its own context. A success value is ignored: callers handle success
+    /// explicitly and route only the error cases here, which collapses the otherwise
+    /// repeated "wallet error vs. transport error" triage to a single arm.
+    pub(crate) fn report_call_error<T>(&mut self, method: &str, result: CallResult<T>) {
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => self.error(crate::fl!(
+                "tui-err-rpc-call",
+                method = method,
+                error = e.to_string()
+            )),
+            Err(e) => self.error(e.to_string()),
+        }
+    }
+
     async fn on_tick(&mut self) {
         // The Logs view is available regardless of lock state, and follows the log tail.
         if self.view == View::Logs && self.logs.scroll_from_bottom == 0 {
@@ -414,12 +422,7 @@ impl App {
 
         match self.client.get_wallet_status().await {
             Ok(Ok(status)) => self.data.status = Some(status),
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "getwalletstatus",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
+            other => self.report_call_error("getwalletstatus", other),
         }
 
         match self.client.get_total_balance(minconf).await {
@@ -433,19 +436,14 @@ impl App {
                 self.data.balances = Some(b);
                 self.data.balances_syncing = false;
             }
-            // `-28` (InWarmup) means the wallet summary isn't ready yet because the wallet
-            // is still syncing/scanning. This is expected, not an error: surface it as a
-            // "syncing" state rather than a scary toast.
-            Ok(Err(e)) if e.code == -28 => {
+            // InWarmup means the wallet summary isn't ready yet because the wallet is still
+            // syncing/scanning. This is expected, not an error: surface it as a "syncing"
+            // state rather than a scary toast.
+            Ok(Err(e)) if e.is_warming_up() => {
                 self.data.balances = None;
                 self.data.balances_syncing = true;
             }
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "z_getbalances",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
+            other => self.report_call_error("z_getbalances", other),
         }
 
         match self.client.list_accounts().await {
@@ -453,12 +451,7 @@ impl App {
                 self.data.accounts = accounts;
                 self.clamp_selection();
             }
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "z_listaccounts",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
+            other => self.report_call_error("z_listaccounts", other),
         }
 
         self.refresh_transactions().await;
@@ -642,7 +635,7 @@ impl App {
         }
 
         match self.view {
-            View::Accounts => views::accounts::on_key(self, key).await,
+            View::Accounts => views::accounts::on_key(self, key),
             View::Addresses => views::addresses::on_key(self, key).await,
             View::Transactions => views::transactions::on_key(self, key).await,
             View::Balances => views::balances::on_key(self, key),
@@ -721,7 +714,8 @@ impl App {
     async fn submit_prompt(&mut self, prompt: Prompt) {
         match prompt.kind {
             PromptKind::Unlock => {
-                // Unlock for 5 minutes.
+                // Unlock for 5 minutes. This path has bespoke messages per failure mode, so
+                // it is matched explicitly rather than routed through `report_call_error`.
                 match self.client.unlock(&prompt.value, 300).await {
                     Ok(Ok(_)) => {
                         self.info(crate::fl!("tui-toast-unlocked"));
@@ -732,12 +726,11 @@ impl App {
                             self.refresh().await;
                         }
                     }
-                    // Wrong passphrase.
-                    Ok(Err(e)) if e.code == -14 => {
+                    Ok(Err(e)) if e.is_incorrect_passphrase() => {
                         self.error(crate::fl!("tui-err-incorrect-passphrase"));
                     }
-                    // Wallet is not encrypted (should not happen: we guard the prompt).
-                    Ok(Err(e)) if e.code == -15 => {
+                    // Not encrypted (should not happen: we guard the prompt).
+                    Ok(Err(e)) if e.is_wrong_encryption_state() => {
                         self.error(crate::fl!("tui-unlock-not-encrypted"));
                     }
                     Ok(Err(e)) => {
@@ -762,12 +755,7 @@ impl App {
                     Ok(Err(e)) if e.is_unlock_needed() => {
                         self.error(crate::fl!("tui-err-locked-press-u-lower"));
                     }
-                    Ok(Err(e)) => self.error(crate::fl!(
-                        "tui-err-rpc-call",
-                        method = "z_getnewaccount",
-                        error = e.to_string()
-                    )),
-                    Err(e) => self.error(e.to_string()),
+                    other => self.report_call_error("z_getnewaccount", other),
                 }
             }
         }
@@ -785,12 +773,7 @@ impl App {
                 self.info(crate::fl!("tui-toast-locked"));
                 self.refresh_lock_state().await;
             }
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "walletlock",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
+            other => self.report_call_error("walletlock", other),
         }
     }
 
@@ -801,36 +784,33 @@ impl App {
         let Some(opid) = self.send.pending_opid.clone() else {
             return;
         };
-        match self.client.operation_status(&opid).await {
-            Ok(Ok(mut statuses)) => {
-                if let Some(status) = statuses.pop() {
-                    let finished =
-                        matches!(status.status.as_str(), "success" | "failed" | "cancelled");
-                    if finished {
-                        self.send.pending_opid = None;
-                        match status.status.as_str() {
-                            "success" => self.info(crate::fl!("tui-toast-send-completed")),
-                            "failed" => {
-                                let msg = status
-                                    .error
-                                    .as_ref()
-                                    .and_then(|e| e.message.clone())
-                                    .unwrap_or_else(|| crate::fl!("tui-err-unknown"));
-                                self.error(crate::fl!("tui-err-send-failed", error = msg));
-                            }
-                            _ => self.info(crate::fl!("tui-toast-send-cancelled")),
-                        }
-                    }
-                    self.send.pending_status = Some(status);
+        let mut statuses = match self.client.operation_status(&opid).await {
+            Ok(Ok(statuses)) => statuses,
+            other => return self.report_call_error("z_getoperationstatus", other),
+        };
+        let Some(status) = statuses.pop() else {
+            return;
+        };
+
+        // A terminal status (success/failed/cancelled) clears the pending op and reports
+        // its outcome; otherwise the operation is still queued or executing and we keep
+        // polling on the next tick.
+        if matches!(status.status.as_str(), "success" | "failed" | "cancelled") {
+            self.send.pending_opid = None;
+            match status.status.as_str() {
+                "success" => self.info(crate::fl!("tui-toast-send-completed")),
+                "failed" => {
+                    let msg = status
+                        .error
+                        .as_ref()
+                        .and_then(|e| e.message.clone())
+                        .unwrap_or_else(|| crate::fl!("tui-err-unknown"));
+                    self.error(crate::fl!("tui-err-send-failed", error = msg));
                 }
+                _ => self.info(crate::fl!("tui-toast-send-cancelled")),
             }
-            Ok(Err(e)) => self.error(crate::fl!(
-                "tui-err-rpc-call",
-                method = "z_getoperationstatus",
-                error = e.to_string()
-            )),
-            Err(e) => self.error(e.to_string()),
         }
+        self.send.pending_status = Some(status);
     }
 }
 

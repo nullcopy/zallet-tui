@@ -84,12 +84,8 @@ fn render_sync(app: &App, frame: &mut Frame<'_>, area: Rect) {
         .and_then(|s| s.sync_work_remaining.as_ref())
     {
         Some(work) => {
-            let p = &work.progress;
-            let ratio = if p.denominator == 0 {
-                1.0
-            } else {
-                (p.numerator as f64 / p.denominator as f64).clamp(0.0, 1.0)
-            };
+            // An indeterminate fraction (empty scan range) is treated as complete here.
+            let ratio = work.progress.fraction().unwrap_or(1.0);
             (
                 ratio,
                 crate::fl!(

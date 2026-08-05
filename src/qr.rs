@@ -45,7 +45,7 @@ pub(crate) fn render(data: &str) -> Option<RenderedQr> {
     // odd, and QUIET_TOP is even, so the sum is odd and we add one light row.
     let body_plus_top = QUIET_TOP + module_width;
     let grid_height = body_plus_top + (body_plus_top % 2);
-    debug_assert!(grid_height % 2 == 0);
+    debug_assert_eq!(grid_height % 2, 0);
 
     // `dark(x, y)` is true when the module at grid coordinate `(x, y)` is dark. The quiet
     // zone is light.
