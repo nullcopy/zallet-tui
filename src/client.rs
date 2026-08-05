@@ -18,6 +18,28 @@ use serde_json::{Value, json};
 
 use crate::config::RpcAuth;
 
+/// Every RPC method the TUI can call.
+///
+/// `zallet-tui check` compares this list against the server's `rpc.discover` schema, so a
+/// Zallet release that drops or renames a method is caught explicitly rather than as a
+/// runtime failure. Keep it in sync with the methods used in this module.
+pub(crate) const REQUIRED_METHODS: [&str; 14] = [
+    "getwalletstatus",
+    "getwalletinfo",
+    "z_getbalances",
+    "z_gettotalbalance",
+    "z_listaccounts",
+    "z_getnewaccount",
+    "z_getaddressforaccount",
+    "z_listtransactions",
+    "walletpassphrase",
+    "walletlock",
+    "z_sendmany",
+    "z_sendfromaccount",
+    "z_getoperationstatus",
+    "z_getoperationresult",
+];
+
 /// Errors that can arise when building or using the TUI's RPC client.
 #[derive(Debug)]
 pub(crate) enum ClientError {
@@ -206,6 +228,13 @@ impl WalletClient {
         }
     }
 
+    // --- Introspection ----------------------------------------------------------------
+
+    /// Fetches the server's OpenRPC schema (`rpc.discover`).
+    pub(crate) async fn discover(&self) -> CallResult<OpenRpcSchema> {
+        self.request("rpc.discover", ArrayParams::new()).await
+    }
+
     // --- Status & balances ------------------------------------------------------------
 
     pub(crate) async fn get_wallet_status(&self) -> CallResult<WalletStatus> {
@@ -364,6 +393,18 @@ fn recipient_object(to: &str, amount: &str, memo: Option<&str>) -> Value {
 //
 // These mirror the JSON shapes produced by the wallet RPC. They are intentionally
 // tolerant: unknown fields are ignored, and optional fields are modelled as `Option`.
+
+/// The subset of an OpenRPC schema document (`rpc.discover`) the TUI cares about.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct OpenRpcSchema {
+    #[serde(default)]
+    pub(crate) methods: Vec<OpenRpcMethod>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct OpenRpcMethod {
+    pub(crate) name: String,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WalletStatus {

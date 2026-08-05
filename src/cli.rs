@@ -28,6 +28,13 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Write a default `zallet-tui.toml` configuration file.
     GenerateConfig(GenerateConfigCmd),
+
+    /// Check that the server exposes every RPC method this TUI uses.
+    ///
+    /// Queries the server's machine-readable schema (`rpc.discover`) and reports any
+    /// required method that is missing — useful as a quick compatibility probe after
+    /// upgrading Zallet. Uses the same connection options as the TUI.
+    Check,
 }
 
 /// Options for the interactive terminal UI (the default command).
@@ -36,15 +43,15 @@ pub(crate) struct TuiCmd {
     /// The Zallet JSON-RPC server URL (e.g. `http://127.0.0.1:8232`).
     ///
     /// Defaults to `http://127.0.0.1:8232`.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", global = true)]
     pub(crate) rpc_url: Option<String>,
 
     /// Username for JSON-RPC authentication (a configured `[[rpc.auth]]` user).
-    #[arg(long, value_name = "USER")]
+    #[arg(long, value_name = "USER", global = true)]
     pub(crate) rpc_user: Option<String>,
 
     /// Password for JSON-RPC authentication.
-    #[arg(long, value_name = "PASSWORD")]
+    #[arg(long, value_name = "PASSWORD", global = true)]
     pub(crate) rpc_password: Option<String>,
 
     /// Path to a Zallet RPC cookie file to authenticate with.
@@ -52,17 +59,17 @@ pub(crate) struct TuiCmd {
     /// Zallet writes a fresh `.cookie` file (containing `__cookie__:<password>`) into its
     /// data directory on every startup; pointing at it avoids configuring a `[[rpc.auth]]`
     /// user by hand. Ignored when `--rpc-user` is given.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub(crate) cookie_file: Option<PathBuf>,
 
     /// Path to a `zallet-tui.toml` configuration file.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub(crate) config: Option<PathBuf>,
 
     /// Client timeout in seconds for HTTP requests, or `0` for no timeout.
     ///
     /// Defaults to 900 seconds.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) timeout: Option<u64>,
 
     /// Path to write the client log file to.
@@ -71,7 +78,7 @@ pub(crate) struct TuiCmd {
     /// standard error. Defaults to a `zallet-tui.log` in the platform log directory
     /// (e.g. `~/.local/state/zallet-tui/` on Linux, `~/Library/Logs/zallet-tui/` on macOS,
     /// `%LOCALAPPDATA%\zallet-tui\logs\` on Windows).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub(crate) log_file: Option<PathBuf>,
 }
 
