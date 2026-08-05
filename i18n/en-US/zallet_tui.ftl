@@ -187,6 +187,7 @@ tui-tx-select = Select a transaction.
 # Send view
 tui-send-cancelled = Send cancelled
 tui-send-err-no-accounts = No accounts available to send from
+tui-send-err-syncing = Wallet is still catching up to the chain tip; sending is unavailable until it is synced
 tui-send-err-no-source = Select a source account
 tui-send-err-no-spendable = Selected account has no spendable address
 tui-send-err-recipient-required = Recipient address is required

@@ -68,10 +68,14 @@ impl RpcError {
         self.code == -15
     }
 
-    /// Whether the wallet is still warming up (scanning/syncing) and cannot answer yet
-    /// (`LegacyCode::InWarmup`).
-    pub(crate) fn is_warming_up(&self) -> bool {
-        self.code == -28
+    /// Whether the wallet cannot answer yet because it is still syncing.
+    ///
+    /// Covers `LegacyCode::InWarmup` (`-28`, warming up / scanning), and the two codes
+    /// Zallet's global sync lock returns from balance and spend methods:
+    /// `ClientInInitialDownload` (`-10`, catching up to the chain tip) and
+    /// `ForbiddenBySafeMode` (`-2`, recovering from a chain reorganization).
+    pub(crate) fn is_unavailable_while_syncing(&self) -> bool {
+        matches!(self.code, -28 | -10 | -2)
     }
 }
 
@@ -321,6 +325,12 @@ pub(crate) struct WalletStatus {
     pub(crate) fully_synced_height: Option<u32>,
     #[serde(default)]
     pub(crate) sync_work_remaining: Option<SyncWorkRemaining>,
+    /// Whether the wallet's global sync lock is engaged, meaning balance and spend
+    /// methods will fail until the wallet catches up to the chain tip.
+    ///
+    /// Absent on Zallet releases up to v0.1.0-beta.2; present on later versions.
+    #[serde(default)]
+    pub(crate) locked: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -747,5 +757,21 @@ mod tests {
         assert_eq!(account.orchard_zat(), 100); // pool columns show spendable only
         assert_eq!(account.pending_total_zat(), 40);
         assert_eq!(account.total_zat(), 140); // spendable + pending
+    }
+
+    /// Exactly the warmup (`-28`) and global-sync-lock (`-10`, `-2`) codes count as
+    /// "still syncing"; other wallet errors must keep surfacing as errors.
+    #[test]
+    fn syncing_codes_are_recognized() {
+        let err = |code| RpcError {
+            code,
+            message: String::new(),
+        };
+        for code in [-28, -10, -2] {
+            assert!(err(code).is_unavailable_while_syncing(), "{code}");
+        }
+        for code in [0, -1, -5, -13, -15, -32601] {
+            assert!(!err(code).is_unavailable_while_syncing(), "{code}");
+        }
     }
 }

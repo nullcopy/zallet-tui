@@ -256,6 +256,20 @@ impl App {
         self.lock_state == LockState::Locked
     }
 
+    /// Whether the wallet's global sync lock is engaged, meaning balance and spend
+    /// methods are unavailable until it catches up to the chain tip.
+    ///
+    /// Only reported by Zallet releases after v0.1.0-beta.2; absent means not locked.
+    /// Not every spend method is gated server-side (`z_sendfromaccount` is not), so this
+    /// is also checked client-side before submitting a send.
+    pub(crate) fn wallet_locked_for_sync(&self) -> bool {
+        self.data
+            .status
+            .as_ref()
+            .and_then(|s| s.locked)
+            .unwrap_or(false)
+    }
+
     /// Whether a text field is currently capturing keystrokes, in which case global
     /// keyboard shortcuts must be suppressed so the characters can be typed.
     fn is_text_input_active(&self) -> bool {
@@ -436,10 +450,11 @@ impl App {
                 self.data.balances = Some(b);
                 self.data.balances_syncing = false;
             }
-            // InWarmup means the wallet summary isn't ready yet because the wallet is still
-            // syncing/scanning. This is expected, not an error: surface it as a "syncing"
-            // state rather than a scary toast.
-            Ok(Err(e)) if e.is_warming_up() => {
+            // The wallet summary isn't ready yet because the wallet is still syncing:
+            // warming up (-28), catching up to the chain tip (-10), or recovering from a
+            // reorg (-2). This is expected, not an error: surface it as a "syncing" state
+            // rather than a scary toast.
+            Ok(Err(e)) if e.is_unavailable_while_syncing() => {
                 self.data.balances = None;
                 self.data.balances_syncing = true;
             }

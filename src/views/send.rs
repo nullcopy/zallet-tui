@@ -110,6 +110,9 @@ fn select_prev_account(app: &mut App) {
 }
 
 fn validate(app: &App) -> Result<(), String> {
+    if app.wallet_locked_for_sync() {
+        return Err(crate::fl!("tui-send-err-syncing"));
+    }
     if app.data.accounts.is_empty() {
         return Err(crate::fl!("tui-send-err-no-accounts"));
     }
