@@ -827,7 +827,10 @@ impl App {
                         .as_ref()
                         .and_then(|e| e.message.clone())
                         .unwrap_or_else(|| crate::fl!("tui-err-unknown"));
-                    self.error(crate::fl!("tui-err-send-failed", error = msg));
+                    self.error(crate::fl!(
+                        "tui-err-send-failed",
+                        error = with_privacy_policy_hint(msg)
+                    ));
                 }
                 _ => self.info(crate::fl!("tui-toast-send-cancelled")),
             }
@@ -838,6 +841,22 @@ impl App {
             let _ = self.client.operation_result(&opid).await;
         }
         self.send.pending_status = Some(status);
+    }
+}
+
+/// Appends a hint about the send form's privacy-policy selector to a wallet error that
+/// rejected a send for privacy-policy reasons.
+///
+/// Since NU6.3 sealed the Orchard pool, this rejection is much more common: spending
+/// Orchard funds crosses into Ironwood, which reveals the crossing amount and so needs
+/// `AllowRevealedAmounts` or weaker — a surprise to users whose sends previously worked
+/// under `FullPrivacy`. The wallet's message names the `privacyPolicy` parameter, which
+/// the TUI surfaces as a form field rather than a parameter, hence the extra pointer.
+pub(crate) fn with_privacy_policy_hint(msg: String) -> String {
+    if msg.to_ascii_lowercase().contains("privacypolicy") {
+        format!("{msg}  {}", crate::fl!("tui-send-policy-hint"))
+    } else {
+        msg
     }
 }
 
@@ -937,5 +956,28 @@ mod tests {
                 all[start..].to_vec()
             );
         }
+    }
+
+    use super::with_privacy_policy_hint;
+
+    /// A wallet error naming `privacyPolicy` (in any casing) gets the form-field hint
+    /// appended after the original message.
+    #[test]
+    fn privacy_policy_rejections_get_a_hint() {
+        crate::i18n::load_languages(&["en-US".parse().unwrap()]);
+        for msg in [
+            "Insufficient funds permitted by privacyPolicy",
+            "the privacypolicy parameter forbids this",
+        ] {
+            let hinted = with_privacy_policy_hint(msg.to_string());
+            assert!(hinted.starts_with(msg), "{hinted}");
+            assert!(hinted.len() > msg.len(), "{hinted}");
+        }
+    }
+
+    #[test]
+    fn other_errors_are_left_unhinted() {
+        let msg = "Insufficient funds, have 0.00, need 1.00".to_string();
+        assert_eq!(with_privacy_policy_hint(msg.clone()), msg);
     }
 }

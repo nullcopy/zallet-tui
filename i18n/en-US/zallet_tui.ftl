@@ -168,6 +168,7 @@ tui-bal-header-ironwood = Ironwood
 tui-bal-header-pending = Pending
 tui-bal-header-total = Total
 tui-bal-title = Balances  (minconf = {$minconf}  [+/-] to change)
+tui-bal-orchard-sealed = ⚠ The Orchard pool is sealed (NU6.3): these funds can only move to your own Ironwood pool, and the crossing amount is public (needs the AllowRevealedAmounts policy).
 tui-bal-syncing = Balances are not available yet — the wallet is still syncing.
 tui-bal-empty = No balances to display.
 
@@ -205,6 +206,7 @@ tui-send-review = [ Review & send ]
 tui-send-no-spendable-suffix = (no spendable address)
 tui-send-fees-note = Fees are computed automatically (ZIP-317).
 tui-send-privacy-warning = ⚠ This policy reduces privacy. Only proceed if you understand the implications.
+tui-send-policy-hint = Tip: since NU6.3, spending sealed Orchard funds crosses into Ironwood and reveals the amount — select AllowRevealedAmounts (or weaker) in the Privacy policy field to allow it.
 tui-send-hint-editing = EDITING — type to enter text · Enter/Esc to finish
 tui-send-hint-text = ↑↓ move · Enter to edit this field · Esc to tabs
 tui-send-hint-submit = ↑↓ move · Enter to review & send · Esc to tabs
