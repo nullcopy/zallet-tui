@@ -369,27 +369,39 @@ pub(crate) struct Balances {
 pub(crate) struct AccountBalance {
     pub(crate) account_uuid: String,
     #[serde(default)]
-    pub(crate) transparent: Option<PoolBalance>,
+    pub(crate) transparent: Option<TransparentBalance>,
     #[serde(default)]
     pub(crate) sapling: Option<PoolBalance>,
     #[serde(default)]
     pub(crate) orchard: Option<PoolBalance>,
     #[serde(default)]
+    pub(crate) ironwood: Option<PoolBalance>,
+    #[serde(default)]
     pub(crate) total: Option<PoolBalance>,
 }
 
 impl AccountBalance {
-    /// Spendable balance in the transparent pool, in zatoshi.
+    /// Spendable balance in the transparent pool (regular and coinbase), in zatoshi.
     pub(crate) fn transparent_zat(&self) -> i64 {
-        spendable(self.transparent.as_ref())
+        self.transparent
+            .as_ref()
+            .map_or(0, TransparentBalance::spendable_zat)
     }
     /// Spendable balance in the Sapling pool, in zatoshi.
     pub(crate) fn sapling_zat(&self) -> i64 {
         spendable(self.sapling.as_ref())
     }
     /// Spendable balance in the Orchard pool, in zatoshi.
+    ///
+    /// Once NU6.3 (Ironwood) is active, the Orchard pool is sealed: funds received at
+    /// Orchard receivers land in the Ironwood pool instead, so this balance can only
+    /// shrink as it is spent or migrated.
     pub(crate) fn orchard_zat(&self) -> i64 {
         spendable(self.orchard.as_ref())
+    }
+    /// Spendable balance in the Ironwood pool, in zatoshi.
+    pub(crate) fn ironwood_zat(&self) -> i64 {
+        spendable(self.ironwood.as_ref())
     }
 
     /// The account's not-yet-spendable (pending) balance across all pools, in zatoshi.
@@ -405,6 +417,26 @@ impl AccountBalance {
 /// The spendable zatoshi in a pool, or `0` if the pool is absent.
 fn spendable(pool: Option<&PoolBalance>) -> i64 {
     pool.map_or(0, PoolBalance::spendable_zat)
+}
+
+/// The transparent portion of an account balance.
+///
+/// Unlike the shielded pools, `z_getbalances` splits transparent funds into `regular` and
+/// `coinbase` buckets (each a category map like the shielded pools), so that coinbase
+/// outputs — which have their own spendability rules — can be reported separately.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct TransparentBalance {
+    #[serde(default)]
+    pub(crate) regular: Option<PoolBalance>,
+    #[serde(default)]
+    pub(crate) coinbase: Option<PoolBalance>,
+}
+
+impl TransparentBalance {
+    /// The spendable balance across the regular and coinbase buckets, in zatoshi.
+    pub(crate) fn spendable_zat(&self) -> i64 {
+        spendable(self.regular.as_ref()) + spendable(self.coinbase.as_ref())
+    }
 }
 
 /// A per-pool (or whole-account `total`) balance, keyed by spendability category.
@@ -659,13 +691,19 @@ mod tests {
         assert_eq!(handle.join().unwrap(), None);
     }
 
-    /// Regression test against a real `z_getbalances` response: pools are nested objects
-    /// (`{"spendable": {"valueZat": N}}`) and absent when empty.
+    /// Regression test against a real `z_getbalances` response (Zallet v0.1.0-beta.2):
+    /// pools are nested objects (`{"spendable": {"valueZat": N}}`) and absent when empty,
+    /// the `ironwood` pool appears alongside `sapling`/`orchard` once NU6.3 is active, and
+    /// `transparent` is split into `regular`/`coinbase` buckets.
     #[test]
     fn balances_deserialize_from_real_response() {
         let json = r#"{"accounts":[
             {"account_uuid":"4e7543e5-1c82-4b5b-8c7e-1113383b763e","total":{"spendable":{"valueZat":0}}},
-            {"account_uuid":"5f24cb93-dcbc-4915-b815-c6ddfa018b86","orchard":{"spendable":{"valueZat":10000000000}},"total":{"spendable":{"valueZat":10000000000}}}
+            {"account_uuid":"5f24cb93-dcbc-4915-b815-c6ddfa018b86",
+             "transparent":{"regular":{"spendable":{"valueZat":50}},"coinbase":{"spendable":{"valueZat":25}}},
+             "orchard":{"spendable":{"valueZat":10000000000}},
+             "ironwood":{"spendable":{"valueZat":300}},
+             "total":{"spendable":{"valueZat":10000000375}}}
         ]}"#;
 
         let balances: Balances = serde_json::from_str(json).expect("parse z_getbalances response");
@@ -674,13 +712,22 @@ mod tests {
         let empty = &balances.accounts[0];
         assert_eq!(empty.transparent_zat(), 0);
         assert_eq!(empty.orchard_zat(), 0);
+        assert_eq!(empty.ironwood_zat(), 0);
         assert_eq!(empty.total_zat(), 0);
 
         let funded = &balances.accounts[1];
         assert_eq!(funded.orchard_zat(), 10_000_000_000);
-        assert_eq!(funded.total_zat(), 10_000_000_000);
-        assert_eq!(funded.transparent_zat(), 0);
+        assert_eq!(funded.ironwood_zat(), 300);
+        assert_eq!(funded.transparent_zat(), 75);
         assert_eq!(funded.sapling_zat(), 0);
+        assert_eq!(funded.total_zat(), 10_000_000_375);
+    }
+
+    /// An empty wallet's `z_getbalances` response omits the `accounts` key entirely.
+    #[test]
+    fn balances_tolerate_missing_accounts_key() {
+        let balances: Balances = serde_json::from_str("{}").expect("parse empty response");
+        assert!(balances.accounts.is_empty());
     }
 
     /// Non-`spendable` categories are summed into the pending total, and the grand total

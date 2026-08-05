@@ -163,6 +163,7 @@ tui-bal-header-account = Account
 tui-bal-header-transparent = Transparent
 tui-bal-header-sapling = Sapling
 tui-bal-header-orchard = Orchard
+tui-bal-header-ironwood = Ironwood
 tui-bal-header-pending = Pending
 tui-bal-header-total = Total
 tui-bal-title = Balances  (minconf = {$minconf}  [+/-] to change)

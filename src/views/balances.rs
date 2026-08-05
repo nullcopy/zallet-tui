@@ -30,6 +30,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Cell::from(crate::fl!("tui-bal-header-transparent")),
         Cell::from(crate::fl!("tui-bal-header-sapling")),
         Cell::from(crate::fl!("tui-bal-header-orchard")),
+        Cell::from(crate::fl!("tui-bal-header-ironwood")),
         Cell::from(crate::fl!("tui-bal-header-pending")),
         Cell::from(crate::fl!("tui-bal-header-total")),
     ])
@@ -58,6 +59,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
                     Cell::from(zec(acct.transparent_zat())),
                     Cell::from(zec(acct.sapling_zat())),
                     Cell::from(zec(acct.orchard_zat())),
+                    Cell::from(zec(acct.ironwood_zat())),
                     Cell::from(zec(acct.pending_total_zat())),
                     Cell::from(zec(acct.total_zat())),
                 ])
@@ -90,12 +92,13 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(22),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
         ],
     )
     .header(header)
