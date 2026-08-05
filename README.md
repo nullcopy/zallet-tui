@@ -25,7 +25,7 @@ wallet in the TUI. It assumes you have both `zallet` and `zallet-tui` installed.
 
    ```toml
    [rpc]
-   bind = ["127.0.0.1:28232"]
+   bind = ["127.0.0.1:8232"]
 
    [[rpc.auth]]
    user = "zallet-tui"
@@ -35,15 +35,20 @@ wallet in the TUI. It assumes you have both `zallet` and `zallet-tui` installed.
    Note the username and the password you chose (NOT the pwhash); `zallet-tui`
    needs the plaintext to authenticate.
 
+   Alternatively, skip creating an RPC user: Zallet writes a fresh `.cookie` credential
+   file into its data directory on every startup, and `zallet-tui --cookie-file
+   <datadir>/.cookie` (or `cookie_file` in `zallet-tui.toml`) authenticates with it
+   directly.
+
 2. **Give `zallet-tui` matching credentials and the RPC URL.** Generate a starter config
    with `zallet-tui generate-config`, then edit it so `rpc_url` matches the `[rpc] bind`
    address above and the `[[auth]]` user/password match what you configured in step 1:
 
    ```toml
-   rpc_url = "http://127.0.0.1:28232"
+   rpc_url = "http://127.0.0.1:8232"
 
    [[auth]]
-   user = "zallet"
+   user = "zallet-tui"
    password = "the-password-you-used-in-step-1"
    ```
 
@@ -74,7 +79,27 @@ wallet in the TUI. It assumes you have both `zallet` and `zallet-tui` installed.
    transactions, and sending become available.
 
 If the wallet is still syncing when you launch, the dashboard shows the sync progress;
-balances and history populate once it catches up.
+balances and history populate once it catches up. (Newer Zallet releases refuse balance
+and spend calls entirely while far behind the chain tip; the TUI shows this as the same
+syncing state.)
+
+## Compatibility
+
+`zallet-tui` targets Zallet v0.1.0-beta.2 or later. Zallet's JSON-RPC surface is still
+pre-1.0 and changes between releases; after upgrading Zallet, run
+
+```sh
+zallet-tui check
+```
+
+to verify that the server still exposes every RPC method the TUI uses.
+
+Since the NU6.3 network upgrade ("Ironwood", July 2026), the Orchard shielded pool is
+sealed and a new Ironwood pool receives funds sent to Orchard receivers. The TUI shows
+Ironwood as its own balance column, flags remaining (at-risk) Orchard funds, and sends
+with an explicit fund source — note that moving sealed Orchard funds crosses into
+Ironwood, which publicly reveals the crossing amount and therefore requires the
+`AllowRevealedAmounts` privacy policy or weaker.
 
 ## Usage
 
