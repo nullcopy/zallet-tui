@@ -6,8 +6,8 @@ use anyhow::{Context as _, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::client::{
-    Account, Balances, CallResult, LockState, OperationStatus, TotalBalance, WalletClient,
-    WalletStatus, WalletTx,
+    Account, Balances, CallResult, LockState, OperationStatus, SendResult, TotalBalance,
+    WalletClient, WalletStatus, WalletTx,
 };
 use crate::event::{Event, EventSource};
 use crate::terminal::Tui;
@@ -127,6 +127,8 @@ pub(crate) struct WalletData {
 pub(crate) struct SendForm {
     /// The source account, as an index into [`WalletData::accounts`].
     pub(crate) from_account: usize,
+    /// The fund source within the account, as an index into [`FUND_SOURCES`].
+    pub(crate) fund_source: usize,
     pub(crate) to: String,
     pub(crate) amount: String,
     pub(crate) memo: String,
@@ -139,7 +141,16 @@ pub(crate) struct SendForm {
     /// Text fields only capture keystrokes while editing; otherwise navigation keys
     /// (`j`/`k`) move between fields. Editing is entered with `Enter` and left with `Esc`.
     pub(crate) editing: bool,
-    /// A submitted operation that is being polled, if any.
+    /// An in-flight `z_sendfromaccount` call, if any.
+    ///
+    /// The call is synchronous on the wallet side — it blocks through proving and
+    /// broadcast, which can take tens of seconds — so it runs on its own task rather
+    /// than on the UI event loop, and is checked for completion on each tick.
+    pub(crate) pending_task: Option<tokio::task::JoinHandle<CallResult<SendResult>>>,
+    /// The result of the last completed send, for display.
+    pub(crate) last_result: Option<SendResult>,
+    /// A submitted `z_sendmany` operation that is being polled, if any (TEX recipients
+    /// only; every other send goes through `pending_task`).
     pub(crate) pending_opid: Option<String>,
     /// The latest known status of the pending operation.
     pub(crate) pending_status: Option<OperationStatus>,
@@ -151,6 +162,7 @@ pub(crate) struct SendForm {
 pub(crate) enum SendField {
     #[default]
     From,
+    FundSource,
     To,
     Amount,
     Memo,
@@ -163,6 +175,23 @@ impl SendField {
     /// Whether this field accepts free-text input (vs. a selector or action).
     pub(crate) fn is_text(self) -> bool {
         matches!(self, SendField::To | SendField::Amount | SendField::Memo)
+    }
+}
+
+/// The fund sources offered in the send form, as accepted by `z_sendfromaccount`.
+///
+/// Each source is isolating: a source that cannot cover the payment reports insufficient
+/// funds rather than reaching into other funds. `"orchard"` covers the Ironwood pool as
+/// well — that is the lever by which sealed Orchard funds migrate.
+pub(crate) const FUND_SOURCES: [&str; 3] = ["orchard", "sapling", "any_transparent"];
+
+/// A human-readable label for a [`FUND_SOURCES`] entry.
+pub(crate) fn fund_source_label(index: usize) -> String {
+    match FUND_SOURCES.get(index).copied() {
+        Some("orchard") => crate::fl!("tui-send-fund-orchard"),
+        Some("sapling") => crate::fl!("tui-send-fund-sapling"),
+        Some("any_transparent") => crate::fl!("tui-send-fund-transparent"),
+        _ => String::new(),
     }
 }
 
@@ -415,6 +444,18 @@ impl App {
         // The Logs view is available regardless of lock state, and follows the log tail.
         if self.view == View::Logs && self.logs.scroll_from_bottom == 0 {
             self.load_logs();
+        }
+
+        // Collect a finished send task even if the wallet has since locked: the
+        // transaction was in flight server-side either way, and its outcome must be
+        // reported. `is_finished()` guarantees the await returns immediately.
+        if self
+            .send
+            .pending_task
+            .as_ref()
+            .is_some_and(|t| t.is_finished())
+        {
+            self.finish_send_task().await;
         }
 
         // Keep the lock state current (it can change when the unlock timeout elapses).
@@ -794,6 +835,37 @@ impl App {
 
     // --- Send polling -----------------------------------------------------------------
 
+    /// Collects the outcome of a completed `z_sendfromaccount` task.
+    async fn finish_send_task(&mut self) {
+        let Some(task) = self.send.pending_task.take() else {
+            return;
+        };
+        match task.await {
+            Ok(Ok(Ok(result))) => {
+                self.info(crate::fl!("tui-toast-send-completed"));
+                self.send.last_result = Some(result);
+                // No refresh here: the tick handler that collected this task refreshes
+                // right afterwards (unless the wallet has locked, hiding the data anyway).
+            }
+            Ok(Ok(Err(e))) if e.is_unlock_needed() => {
+                self.error(crate::fl!("tui-err-locked-press-u-upper"));
+            }
+            Ok(Ok(Err(e))) => {
+                self.error(crate::fl!(
+                    "tui-err-send-failed",
+                    error = with_privacy_policy_hint(e.to_string())
+                ));
+            }
+            Ok(Err(e)) => self.error(e.to_string()),
+            // The task itself panicked or was cancelled; neither should happen, and the
+            // send's fate is unknown — tell the user to check the transaction list.
+            Err(e) => {
+                tracing::error!(error = %e, "send task failed to complete");
+                self.error(crate::fl!("tui-err-send-task-failed"));
+            }
+        }
+    }
+
     /// Polls the pending send operation and updates its status.
     pub(crate) async fn poll_send(&mut self) {
         let Some(opid) = self.send.pending_opid.clone() else {
@@ -820,7 +892,16 @@ impl App {
         if matches!(status.status.as_str(), "success" | "failed" | "cancelled") {
             self.send.pending_opid = None;
             match status.status.as_str() {
-                "success" => self.info(crate::fl!("tui-toast-send-completed")),
+                "success" => {
+                    self.info(crate::fl!("tui-toast-send-completed"));
+                    // Surface the broadcast txid(s) the same way the `z_sendfromaccount`
+                    // path does: a TEX payment takes two transactions, and only the
+                    // `txids` list in the operation result carries both.
+                    self.send.last_result = status
+                        .result
+                        .as_ref()
+                        .and_then(|r| serde_json::from_value(r.clone()).ok());
+                }
                 "failed" => {
                     let msg = status
                         .error

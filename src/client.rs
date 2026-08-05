@@ -275,6 +275,11 @@ impl WalletClient {
     // --- Sending ----------------------------------------------------------------------
 
     /// Submits a `z_sendmany`, returning the async operation id.
+    ///
+    /// This is the legacy send path, kept because it is the only method that can pay a
+    /// ZIP 320 (TEX) recipient — that takes two transactions, which the PCZT pipeline
+    /// behind `z_sendfromaccount` cannot express. All other sends use
+    /// [`Self::send_from_account`].
     pub(crate) async fn send_many(
         &self,
         from: &str,
@@ -283,23 +288,37 @@ impl WalletClient {
         memo: Option<&str>,
         privacy_policy: &str,
     ) -> CallResult<String> {
-        let mut recipient = serde_json::Map::new();
-        recipient.insert("address".into(), json!(to));
-        recipient.insert("amount".into(), json!(amount));
-        if let Some(memo) = memo {
-            // The wallet expects the memo as hex-encoded bytes, but the form captures it as
-            // human-readable text, so encode the UTF-8 bytes here.
-            recipient.insert(
-                "memo".into(),
-                json!(crate::format::hex_encode(memo.as_bytes())),
-            );
-        }
-        let recipients = Value::Array(vec![Value::Object(recipient)]);
+        let recipients = Value::Array(vec![recipient_object(to, amount, memo)]);
 
         // from, [recipient], minconf = 1, fee = null (ZIP-317 automatic), privacy_policy.
         self.request(
             "z_sendmany",
             rpc_params![from, recipients, 1, Value::Null, privacy_policy],
+        )
+        .await
+    }
+
+    /// Submits a `z_sendfromaccount`, returning the broadcast transaction ids.
+    ///
+    /// Unlike `z_sendmany`, this spends directly from an account (by UUID) rather than
+    /// from an address, takes an explicit fund source (each source is isolating: it does
+    /// not reach into other funds), and completes synchronously — the call blocks through
+    /// proving and broadcast, so it must not be awaited on the UI event loop.
+    pub(crate) async fn send_from_account(
+        &self,
+        account_uuid: &str,
+        fund_source: &str,
+        to: &str,
+        amount: &str,
+        memo: Option<&str>,
+        privacy_policy: &str,
+    ) -> CallResult<SendResult> {
+        let recipients = Value::Array(vec![recipient_object(to, amount, memo)]);
+
+        // account, fund_source, [recipient], minconf = 1, privacy_policy (required).
+        self.request(
+            "z_sendfromaccount",
+            rpc_params![account_uuid, fund_source, recipients, 1, privacy_policy],
         )
         .await
     }
@@ -320,6 +339,25 @@ impl WalletClient {
         self.request("z_getoperationresult", rpc_params![[opid]])
             .await
     }
+}
+
+/// Builds one entry of a send's `amounts`/`recipients` parameter.
+///
+/// The wallet rejects unknown keys in these objects (`deny_unknown_fields`), so only the
+/// three defined keys are ever set, and `memo` only when present.
+fn recipient_object(to: &str, amount: &str, memo: Option<&str>) -> Value {
+    let mut recipient = serde_json::Map::new();
+    recipient.insert("address".into(), json!(to));
+    recipient.insert("amount".into(), json!(amount));
+    if let Some(memo) = memo {
+        // The wallet expects the memo as hex-encoded bytes, but the form captures it as
+        // human-readable text, so encode the UTF-8 bytes here.
+        recipient.insert(
+            "memo".into(),
+            json!(crate::format::hex_encode(memo.as_bytes())),
+        );
+    }
+    Value::Object(recipient)
 }
 
 // --- Response types -------------------------------------------------------------------
@@ -603,6 +641,30 @@ pub(crate) struct WalletTx {
     pub(crate) expired_unmined: bool,
 }
 
+/// The result of a completed send: the transaction ids that were broadcast.
+///
+/// Returned directly by `z_sendfromaccount`, and as the `result` of a successful
+/// `z_sendmany` operation. `txid` is only present when the payment took a single
+/// transaction; `txids` always lists every transaction.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct SendResult {
+    #[serde(default)]
+    pub(crate) txid: Option<String>,
+    #[serde(default)]
+    pub(crate) txids: Vec<String>,
+}
+
+impl SendResult {
+    /// A display string for the broadcast transaction id(s).
+    pub(crate) fn txids_label(&self) -> String {
+        match &self.txid {
+            Some(txid) => txid.clone(),
+            None if self.txids.is_empty() => crate::fl!("tui-value-unknown"),
+            None => self.txids.join(", "),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct OperationStatus {
     pub(crate) status: String,
@@ -768,6 +830,23 @@ mod tests {
         assert_eq!(account.orchard_zat(), 100); // pool columns show spendable only
         assert_eq!(account.pending_total_zat(), 40);
         assert_eq!(account.total_zat(), 140); // spendable + pending
+    }
+
+    /// The txid label prefers the single `txid`, joins a multi-transaction `txids` list
+    /// (e.g. a ZIP 320 TEX payment), and falls back to a placeholder when both are empty.
+    #[test]
+    fn send_result_txid_labels() {
+        crate::i18n::load_languages(&["en-US".parse().unwrap()]);
+        let result = |txid: Option<&str>, txids: &[&str]| SendResult {
+            txid: txid.map(str::to_string),
+            txids: txids.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(result(Some("aa"), &["aa"]).txids_label(), "aa");
+        assert_eq!(result(None, &["aa", "bb"]).txids_label(), "aa, bb");
+        assert_eq!(
+            result(None, &[]).txids_label(),
+            crate::fl!("tui-value-unknown")
+        );
     }
 
     /// Exactly the warmup (`-28`) and global-sync-lock (`-10`, `-2`) codes count as

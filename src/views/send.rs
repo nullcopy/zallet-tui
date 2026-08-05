@@ -1,8 +1,9 @@
-//! Send view: a form for `z_sendmany` with confirmation and inline operation polling.
+//! Send view: a form for `z_sendfromaccount` with confirmation and completion tracking.
 //!
-//! The "from" field is an account selector rather than free text: `z_sendmany` requires an
-//! address as its source, so the selected account is resolved to one of its addresses (a
-//! unified address where possible) at submit time.
+//! The "from" field is an account selector; the selected account's UUID is passed to
+//! `z_sendfromaccount` directly, together with an explicit fund source. The one exception
+//! is a ZIP 320 (TEX) recipient, which only `z_sendmany` can pay: those are routed through
+//! the legacy address-sourced async-operation path.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -13,7 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::app::{App, PRIVACY_POLICIES, SendField};
+use crate::app::{App, FUND_SOURCES, PRIVACY_POLICIES, SendField, fund_source_label};
 
 /// Handles a key event for the send view.
 ///
@@ -66,6 +67,12 @@ pub(crate) async fn on_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Right | KeyCode::Char('l') if app.send.field == SendField::From => {
             select_next_account(app)
+        }
+        KeyCode::Left | KeyCode::Char('h') if app.send.field == SendField::FundSource => {
+            app.send.fund_source = app.send.fund_source.saturating_sub(1);
+        }
+        KeyCode::Right | KeyCode::Char('l') if app.send.field == SendField::FundSource => {
+            app.send.fund_source = (app.send.fund_source + 1).min(FUND_SOURCES.len() - 1);
         }
         KeyCode::Left | KeyCode::Char('h') if app.send.field == SendField::PrivacyPolicy => {
             app.send.privacy_policy = app.send.privacy_policy.saturating_sub(1);
@@ -121,8 +128,13 @@ fn validate(app: &App) -> Result<(), String> {
         .accounts
         .get(app.send.from_account)
         .ok_or_else(|| crate::fl!("tui-send-err-no-source"))?;
-    if account.spend_source_address().is_none() {
+    // A TEX recipient is routed through `z_sendmany`, which spends from an address
+    // rather than an account and so needs one to exist.
+    if is_tex_recipient(app.send.to.trim()) && account.spend_source_address().is_none() {
         return Err(crate::fl!("tui-send-err-no-spendable"));
+    }
+    if app.send.pending_task.is_some() || app.send.pending_opid.is_some() {
+        return Err(crate::fl!("tui-send-err-in-flight"));
     }
     if app.send.to.trim().is_empty() {
         return Err(crate::fl!("tui-send-err-recipient-required"));
@@ -164,15 +176,27 @@ fn is_valid_amount(s: &str) -> bool {
         .any(|b| b != b'0')
 }
 
+/// Whether `address` is a ZIP 320 (TEX) address, which only `z_sendmany` can pay.
+fn is_tex_recipient(address: &str) -> bool {
+    // The ZIP 320 HRPs: `tex` (mainnet), `textest` (testnet), `texregtest` (regtest).
+    ["tex1", "textest1", "texregtest1"]
+        .iter()
+        .any(|hrp| address.starts_with(hrp))
+}
+
 async fn submit(app: &mut App) {
+    // Validation ran when the confirmation dialog opened, but the sync lock can engage
+    // while it sits open — and `z_sendfromaccount` is not gated server-side, so this
+    // client-side check is the only gate. Re-check at the moment of submission.
+    if app.wallet_locked_for_sync() {
+        app.error(crate::fl!("tui-send-err-syncing"));
+        return;
+    }
     let Some(account) = app.data.accounts.get(app.send.from_account) else {
         app.error(crate::fl!("tui-send-err-no-source-selected"));
         return;
     };
-    let Some(from) = account.spend_source_address().map(|s| s.to_string()) else {
-        app.error(crate::fl!("tui-send-err-no-spendable"));
-        return;
-    };
+    let account_uuid = account.account_uuid.clone();
 
     let to = app.send.to.trim().to_string();
     let amount = app.send.amount.trim().to_string();
@@ -186,22 +210,62 @@ async fn submit(app: &mut App) {
     };
     let policy = PRIVACY_POLICIES[app.send.privacy_policy];
 
-    match app
-        .client()
-        .send_many(&from, &to, &amount, memo.as_deref(), policy)
-        .await
-    {
-        Ok(Ok(opid)) => {
-            app.info(crate::fl!("tui-send-submitted", opid = opid.clone()));
-            app.send.pending_opid = Some(opid);
-            app.send.pending_status = None;
-            app.poll_send().await;
+    // TEX recipients require two transactions, which only the legacy `z_sendmany`
+    // async-operation path can produce.
+    if is_tex_recipient(&to) {
+        let Some(from) = app
+            .data
+            .accounts
+            .get(app.send.from_account)
+            .and_then(|a| a.spend_source_address())
+            .map(|s| s.to_string())
+        else {
+            app.error(crate::fl!("tui-send-err-no-spendable"));
+            return;
+        };
+
+        match app
+            .client()
+            .send_many(&from, &to, &amount, memo.as_deref(), policy)
+            .await
+        {
+            Ok(Ok(opid)) => {
+                app.info(crate::fl!("tui-send-submitted", opid = opid.clone()));
+                app.send.pending_opid = Some(opid);
+                app.send.pending_status = None;
+                app.send.last_result = None;
+                app.poll_send().await;
+            }
+            Ok(Err(e)) if e.is_unlock_needed() => {
+                app.error(crate::fl!("tui-err-locked-press-u-upper"));
+            }
+            other => app.report_call_error("z_sendmany", other),
         }
-        Ok(Err(e)) if e.is_unlock_needed() => {
-            app.error(crate::fl!("tui-err-locked-press-u-upper"));
-        }
-        other => app.report_call_error("z_sendmany", other),
+        return;
     }
+
+    // Everything else goes through `z_sendfromaccount`, which spends from the account
+    // UUID directly. The call is synchronous through proving and broadcast, so it runs
+    // on its own task; the tick handler collects the outcome.
+    let client = app.client().clone();
+    let fund_source = FUND_SOURCES[app.send.fund_source].to_string();
+    let policy = policy.to_string();
+    let task = tokio::spawn(async move {
+        client
+            .send_from_account(
+                &account_uuid,
+                &fund_source,
+                &to,
+                &amount,
+                memo.as_deref(),
+                &policy,
+            )
+            .await
+    });
+    app.send.pending_task = Some(task);
+    app.send.pending_status = None;
+    app.send.last_result = None;
+    app.info(crate::fl!("tui-toast-send-started"));
 }
 
 pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -235,6 +299,16 @@ fn render_form(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Line::from(vec![
             label_span(&crate::fl!("tui-send-from"), f.field == SendField::From),
             Span::styled(from_label, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            label_span(
+                &crate::fl!("tui-send-fund-source"),
+                f.field == SendField::FundSource,
+            ),
+            Span::styled(
+                format!("◀ {} ▶", fund_source_label(f.fund_source)),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         input_line(
             &crate::fl!("tui-send-to"),
@@ -329,7 +403,7 @@ fn render_status(app: &App, frame: &mut Frame<'_>, area: Rect) {
             .get(f.from_account)
             .map(|a| a.label())
             .unwrap_or_default();
-        vec![
+        let mut lines = vec![
             Line::from(Span::styled(
                 crate::fl!("tui-send-confirm"),
                 Style::default()
@@ -345,10 +419,41 @@ fn render_status(app: &App, frame: &mut Frame<'_>, area: Rect) {
                     to = f.to.trim()
                 )
             )),
+        ];
+        // A TEX recipient is routed through the legacy `z_sendmany` path, which spends
+        // from an address rather than the account — the Funds selection does not apply,
+        // so say so instead of silently ignoring it.
+        if is_tex_recipient(f.to.trim()) {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", crate::fl!("tui-send-confirm-tex")),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  {}", crate::fl!("tui-send-confirm-hint")),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines
+    } else if app.send.pending_task.is_some() {
+        vec![
             Line::from(Span::styled(
-                format!("  {}", crate::fl!("tui-send-confirm-hint")),
+                crate::fl!("tui-send-sending"),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                crate::fl!("tui-send-sending-hint"),
                 Style::default().fg(Color::DarkGray),
             )),
+        ]
+    } else if let Some(result) = &app.send.last_result {
+        vec![
+            Line::from(Span::styled(
+                crate::fl!("tui-send-succeeded"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(crate::fl!("tui-send-txid", txid = result.txids_label())),
         ]
     } else if let Some(opid) = &app.send.pending_opid {
         let status = app
@@ -439,7 +544,8 @@ fn policy_style(index: usize) -> Style {
 
 fn next_field(field: SendField) -> SendField {
     match field {
-        SendField::From => SendField::To,
+        SendField::From => SendField::FundSource,
+        SendField::FundSource => SendField::To,
         SendField::To => SendField::Amount,
         SendField::Amount => SendField::Memo,
         SendField::Memo => SendField::PrivacyPolicy,
@@ -451,7 +557,8 @@ fn next_field(field: SendField) -> SendField {
 fn prev_field(field: SendField) -> SendField {
     match field {
         SendField::From => SendField::Submit,
-        SendField::To => SendField::From,
+        SendField::FundSource => SendField::From,
+        SendField::To => SendField::FundSource,
         SendField::Amount => SendField::To,
         SendField::Memo => SendField::Amount,
         SendField::PrivacyPolicy => SendField::Memo,
@@ -466,13 +573,25 @@ fn text_field_mut(app: &mut App) -> Option<&mut String> {
         SendField::To => Some(&mut app.send.to),
         SendField::Amount => Some(&mut app.send.amount),
         SendField::Memo => Some(&mut app.send.memo),
-        SendField::From | SendField::PrivacyPolicy | SendField::Submit => None,
+        SendField::From | SendField::FundSource | SendField::PrivacyPolicy | SendField::Submit => {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_valid_amount;
+    use super::{is_tex_recipient, is_valid_amount};
+
+    #[test]
+    fn tex_recipients_are_detected_on_every_network() {
+        for addr in ["tex1qabc", "textest1qabc", "texregtest1qabc"] {
+            assert!(is_tex_recipient(addr), "{addr}");
+        }
+        for addr in ["t1abc", "u1abc", "zs1abc", "tez1abc", "text1abc", ""] {
+            assert!(!is_tex_recipient(addr), "{addr}");
+        }
+    }
 
     #[test]
     fn accepts_well_formed_positive_amounts() {
