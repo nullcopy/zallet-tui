@@ -3,9 +3,9 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
-    layout::{Constraint, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
 
 use crate::app::App;
@@ -30,6 +30,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Cell::from(crate::fl!("tui-bal-header-transparent")),
         Cell::from(crate::fl!("tui-bal-header-sapling")),
         Cell::from(crate::fl!("tui-bal-header-orchard")),
+        Cell::from(crate::fl!("tui-bal-header-ironwood")),
         Cell::from(crate::fl!("tui-bal-header-pending")),
         Cell::from(crate::fl!("tui-bal-header-total")),
     ])
@@ -58,6 +59,7 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
                     Cell::from(zec(acct.transparent_zat())),
                     Cell::from(zec(acct.sapling_zat())),
                     Cell::from(zec(acct.orchard_zat())),
+                    Cell::from(zec(acct.ironwood_zat())),
                     Cell::from(zec(acct.pending_total_zat())),
                     Cell::from(zec(acct.total_zat())),
                 ])
@@ -87,15 +89,38 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         return;
     }
 
+    // ZIP 318 asks wallets to surface at-risk Orchard balances: since NU6.3 the Orchard
+    // pool is sealed, so any spendable Orchard funds can only move (publicly, in amount)
+    // into the account's own Ironwood pool. Show a notice whenever such funds exist.
+    let orchard_at_risk = app
+        .data
+        .balances
+        .as_ref()
+        .is_some_and(|b| b.accounts.iter().any(|a| a.orchard_zat() > 0));
+    let (table_area, note_area) = if orchard_at_risk && area.height > 4 {
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+    if let Some(note_area) = note_area {
+        let note = Paragraph::new(crate::fl!("tui-bal-orchard-sealed"))
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(note, note_area);
+    }
+    let area = table_area;
+
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(22),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
         ],
     )
     .header(header)

@@ -47,6 +47,7 @@ fn main() {
 
     let result = match cli.command {
         Some(Command::GenerateConfig(cmd)) => generate_config(cmd),
+        Some(Command::Check) => check(cli.tui),
         None => run(cli.tui),
     };
 
@@ -64,6 +65,56 @@ fn generate_config(cmd: GenerateConfigCmd) -> Result<()> {
     let path = config::generate_default(cmd.output.as_deref(), cmd.force)?;
     println!("Wrote default configuration to {}", path.display());
     Ok(())
+}
+
+/// Checks that the server exposes every RPC method the TUI uses, via `rpc.discover`.
+fn check(cmd: TuiCmd) -> Result<()> {
+    // Error `Display` impls go through the localization loader, so it must be initialized
+    // even though this path prints plain output.
+    i18n::load_languages(&requested_languages());
+
+    let config = Config::load(cmd.config.as_deref())?;
+    let connection = Connection::resolve(&cmd, &config);
+    let client = connection.connect()?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the Tokio runtime")?;
+    let schema = match runtime.block_on(client.discover())? {
+        Ok(schema) => schema,
+        Err(e) => anyhow::bail!("rpc.discover failed: {e}"),
+    };
+
+    let missing = missing_methods(&schema);
+    if missing.is_empty() {
+        println!(
+            "OK: the server exposes all {} RPC methods zallet-tui uses (of {} methods served).",
+            client::REQUIRED_METHODS.len(),
+            schema.methods.len()
+        );
+        Ok(())
+    } else {
+        for method in &missing {
+            println!("MISSING: {method}");
+        }
+        anyhow::bail!(
+            "the server is missing {} of the {} RPC methods zallet-tui uses",
+            missing.len(),
+            client::REQUIRED_METHODS.len()
+        );
+    }
+}
+
+/// The [`client::REQUIRED_METHODS`] that `schema` does not serve, in the order required.
+fn missing_methods(schema: &client::OpenRpcSchema) -> Vec<&'static str> {
+    let available: std::collections::BTreeSet<&str> =
+        schema.methods.iter().map(|m| m.name.as_str()).collect();
+    client::REQUIRED_METHODS
+        .iter()
+        .copied()
+        .filter(|method| !available.contains(method))
+        .collect()
 }
 
 fn run(cmd: TuiCmd) -> Result<()> {
@@ -160,4 +211,39 @@ fn requested_languages() -> Vec<LanguageIdentifier> {
         }
     }
     vec!["en-US".parse().expect("en-US is a valid language tag")]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_methods;
+    use crate::client::{OpenRpcMethod, OpenRpcSchema, REQUIRED_METHODS};
+
+    fn schema_of(names: &[&str]) -> OpenRpcSchema {
+        OpenRpcSchema {
+            methods: names
+                .iter()
+                .map(|n| OpenRpcMethod {
+                    name: n.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn missing_methods_reports_exactly_the_unserved_methods() {
+        // A server exposing everything (plus extras) has nothing missing.
+        let mut served: Vec<&str> = REQUIRED_METHODS.to_vec();
+        served.push("getinfo");
+        assert!(missing_methods(&schema_of(&served)).is_empty());
+
+        // Dropping methods reports precisely those, regardless of extras.
+        served.retain(|m| *m != "z_sendfromaccount" && *m != "z_getbalances");
+        assert_eq!(
+            missing_methods(&schema_of(&served)),
+            ["z_getbalances", "z_sendfromaccount"]
+        );
+
+        // An empty schema is missing everything.
+        assert_eq!(missing_methods(&schema_of(&[])), REQUIRED_METHODS);
+    }
 }

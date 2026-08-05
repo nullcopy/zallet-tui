@@ -6,8 +6,8 @@ use anyhow::{Context as _, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::client::{
-    Account, Balances, CallResult, LockState, OperationStatus, TotalBalance, WalletClient,
-    WalletStatus, WalletTx,
+    Account, Balances, CallResult, LockState, OperationStatus, SendResult, TotalBalance,
+    WalletClient, WalletStatus, WalletTx,
 };
 use crate::event::{Event, EventSource};
 use crate::terminal::Tui;
@@ -127,6 +127,8 @@ pub(crate) struct WalletData {
 pub(crate) struct SendForm {
     /// The source account, as an index into [`WalletData::accounts`].
     pub(crate) from_account: usize,
+    /// The fund source within the account, as an index into [`FUND_SOURCES`].
+    pub(crate) fund_source: usize,
     pub(crate) to: String,
     pub(crate) amount: String,
     pub(crate) memo: String,
@@ -139,7 +141,16 @@ pub(crate) struct SendForm {
     /// Text fields only capture keystrokes while editing; otherwise navigation keys
     /// (`j`/`k`) move between fields. Editing is entered with `Enter` and left with `Esc`.
     pub(crate) editing: bool,
-    /// A submitted operation that is being polled, if any.
+    /// An in-flight `z_sendfromaccount` call, if any.
+    ///
+    /// The call is synchronous on the wallet side — it blocks through proving and
+    /// broadcast, which can take tens of seconds — so it runs on its own task rather
+    /// than on the UI event loop, and is checked for completion on each tick.
+    pub(crate) pending_task: Option<tokio::task::JoinHandle<CallResult<SendResult>>>,
+    /// The result of the last completed send, for display.
+    pub(crate) last_result: Option<SendResult>,
+    /// A submitted `z_sendmany` operation that is being polled, if any (TEX recipients
+    /// only; every other send goes through `pending_task`).
     pub(crate) pending_opid: Option<String>,
     /// The latest known status of the pending operation.
     pub(crate) pending_status: Option<OperationStatus>,
@@ -151,6 +162,7 @@ pub(crate) struct SendForm {
 pub(crate) enum SendField {
     #[default]
     From,
+    FundSource,
     To,
     Amount,
     Memo,
@@ -163,6 +175,23 @@ impl SendField {
     /// Whether this field accepts free-text input (vs. a selector or action).
     pub(crate) fn is_text(self) -> bool {
         matches!(self, SendField::To | SendField::Amount | SendField::Memo)
+    }
+}
+
+/// The fund sources offered in the send form, as accepted by `z_sendfromaccount`.
+///
+/// Each source is isolating: a source that cannot cover the payment reports insufficient
+/// funds rather than reaching into other funds. `"orchard"` covers the Ironwood pool as
+/// well — that is the lever by which sealed Orchard funds migrate.
+pub(crate) const FUND_SOURCES: [&str; 3] = ["orchard", "sapling", "any_transparent"];
+
+/// A human-readable label for a [`FUND_SOURCES`] entry.
+pub(crate) fn fund_source_label(index: usize) -> String {
+    match FUND_SOURCES.get(index).copied() {
+        Some("orchard") => crate::fl!("tui-send-fund-orchard"),
+        Some("sapling") => crate::fl!("tui-send-fund-sapling"),
+        Some("any_transparent") => crate::fl!("tui-send-fund-transparent"),
+        _ => String::new(),
     }
 }
 
@@ -254,6 +283,20 @@ impl App {
     /// Whether the wallet is currently inaccessible and must be unlocked before use.
     pub(crate) fn is_gated(&self) -> bool {
         self.lock_state == LockState::Locked
+    }
+
+    /// Whether the wallet's global sync lock is engaged, meaning balance and spend
+    /// methods are unavailable until it catches up to the chain tip.
+    ///
+    /// Only reported by Zallet releases after v0.1.0-beta.2; absent means not locked.
+    /// Not every spend method is gated server-side (`z_sendfromaccount` is not), so this
+    /// is also checked client-side before submitting a send.
+    pub(crate) fn wallet_locked_for_sync(&self) -> bool {
+        self.data
+            .status
+            .as_ref()
+            .and_then(|s| s.locked)
+            .unwrap_or(false)
     }
 
     /// Whether a text field is currently capturing keystrokes, in which case global
@@ -403,6 +446,18 @@ impl App {
             self.load_logs();
         }
 
+        // Collect a finished send task even if the wallet has since locked: the
+        // transaction was in flight server-side either way, and its outcome must be
+        // reported. `is_finished()` guarantees the await returns immediately.
+        if self
+            .send
+            .pending_task
+            .as_ref()
+            .is_some_and(|t| t.is_finished())
+        {
+            self.finish_send_task().await;
+        }
+
         // Keep the lock state current (it can change when the unlock timeout elapses).
         self.refresh_lock_state().await;
         if self.is_gated() {
@@ -436,10 +491,11 @@ impl App {
                 self.data.balances = Some(b);
                 self.data.balances_syncing = false;
             }
-            // InWarmup means the wallet summary isn't ready yet because the wallet is still
-            // syncing/scanning. This is expected, not an error: surface it as a "syncing"
-            // state rather than a scary toast.
-            Ok(Err(e)) if e.is_warming_up() => {
+            // The wallet summary isn't ready yet because the wallet is still syncing:
+            // warming up (-28), catching up to the chain tip (-10), or recovering from a
+            // reorg (-2). This is expected, not an error: surface it as a "syncing" state
+            // rather than a scary toast.
+            Ok(Err(e)) if e.is_unavailable_while_syncing() => {
                 self.data.balances = None;
                 self.data.balances_syncing = true;
             }
@@ -465,12 +521,23 @@ impl App {
         {
             Ok(Ok(txs)) => {
                 self.data.transactions = txs;
+                self.transactions.error = None;
                 if self.transactions.selected >= self.data.transactions.len() {
                     self.transactions.selected = self.data.transactions.len().saturating_sub(1);
                 }
             }
-            // z_listtransactions is experimental; don't spam errors on empty wallets.
-            Ok(Err(_)) => self.data.transactions.clear(),
+            // The wallet is still syncing; an empty list with no error is the right state.
+            Ok(Err(e)) if e.is_unavailable_while_syncing() => {
+                self.data.transactions.clear();
+                self.transactions.error = None;
+            }
+            // z_listtransactions is experimental, so don't spam toasts on every tick;
+            // record the error for the view to display in place of the list instead of
+            // silently showing an empty history.
+            Ok(Err(e)) => {
+                self.data.transactions.clear();
+                self.transactions.error = Some(e.to_string());
+            }
             Err(e) => self.error(e.to_string()),
         }
     }
@@ -779,6 +846,37 @@ impl App {
 
     // --- Send polling -----------------------------------------------------------------
 
+    /// Collects the outcome of a completed `z_sendfromaccount` task.
+    async fn finish_send_task(&mut self) {
+        let Some(task) = self.send.pending_task.take() else {
+            return;
+        };
+        match task.await {
+            Ok(Ok(Ok(result))) => {
+                self.info(crate::fl!("tui-toast-send-completed"));
+                self.send.last_result = Some(result);
+                // No refresh here: the tick handler that collected this task refreshes
+                // right afterwards (unless the wallet has locked, hiding the data anyway).
+            }
+            Ok(Ok(Err(e))) if e.is_unlock_needed() => {
+                self.error(crate::fl!("tui-err-locked-press-u-upper"));
+            }
+            Ok(Ok(Err(e))) => {
+                self.error(crate::fl!(
+                    "tui-err-send-failed",
+                    error = with_privacy_policy_hint(e.to_string())
+                ));
+            }
+            Ok(Err(e)) => self.error(e.to_string()),
+            // The task itself panicked or was cancelled; neither should happen, and the
+            // send's fate is unknown — tell the user to check the transaction list.
+            Err(e) => {
+                tracing::error!(error = %e, "send task failed to complete");
+                self.error(crate::fl!("tui-err-send-task-failed"));
+            }
+        }
+    }
+
     /// Polls the pending send operation and updates its status.
     pub(crate) async fn poll_send(&mut self) {
         let Some(opid) = self.send.pending_opid.clone() else {
@@ -789,6 +887,13 @@ impl App {
             other => return self.report_call_error("z_getoperationstatus", other),
         };
         let Some(status) = statuses.pop() else {
+            // The wallet no longer knows this operation: its bounded operation queue can
+            // evict finished (but uncollected) operations, and the queue does not survive
+            // a wallet restart. Polling further would spin forever, so give up and tell
+            // the user to check the transaction list for the outcome.
+            self.send.pending_opid = None;
+            self.send.pending_status = None;
+            self.error(crate::fl!("tui-err-send-op-lost", opid = opid));
             return;
         };
 
@@ -798,19 +903,52 @@ impl App {
         if matches!(status.status.as_str(), "success" | "failed" | "cancelled") {
             self.send.pending_opid = None;
             match status.status.as_str() {
-                "success" => self.info(crate::fl!("tui-toast-send-completed")),
+                "success" => {
+                    self.info(crate::fl!("tui-toast-send-completed"));
+                    // Surface the broadcast txid(s) the same way the `z_sendfromaccount`
+                    // path does: a TEX payment takes two transactions, and only the
+                    // `txids` list in the operation result carries both.
+                    self.send.last_result = status
+                        .result
+                        .as_ref()
+                        .and_then(|r| serde_json::from_value(r.clone()).ok());
+                }
                 "failed" => {
                     let msg = status
                         .error
                         .as_ref()
                         .and_then(|e| e.message.clone())
                         .unwrap_or_else(|| crate::fl!("tui-err-unknown"));
-                    self.error(crate::fl!("tui-err-send-failed", error = msg));
+                    self.error(crate::fl!(
+                        "tui-err-send-failed",
+                        error = with_privacy_policy_hint(msg)
+                    ));
                 }
                 _ => self.info(crate::fl!("tui-toast-send-cancelled")),
             }
+            // Collect the finished operation so it does not linger in (and eventually
+            // overflow) the wallet's bounded operation queue. The status in hand already
+            // carries the result, so the response is not needed; failure to collect is
+            // harmless and will resolve on wallet restart.
+            let _ = self.client.operation_result(&opid).await;
         }
         self.send.pending_status = Some(status);
+    }
+}
+
+/// Appends a hint about the send form's privacy-policy selector to a wallet error that
+/// rejected a send for privacy-policy reasons.
+///
+/// Since NU6.3 sealed the Orchard pool, this rejection is much more common: spending
+/// Orchard funds crosses into Ironwood, which reveals the crossing amount and so needs
+/// `AllowRevealedAmounts` or weaker — a surprise to users whose sends previously worked
+/// under `FullPrivacy`. The wallet's message names the `privacyPolicy` parameter, which
+/// the TUI surfaces as a form field rather than a parameter, hence the extra pointer.
+pub(crate) fn with_privacy_policy_hint(msg: String) -> String {
+    if msg.to_ascii_lowercase().contains("privacypolicy") {
+        format!("{msg}  {}", crate::fl!("tui-send-policy-hint"))
+    } else {
+        msg
     }
 }
 
@@ -910,5 +1048,28 @@ mod tests {
                 all[start..].to_vec()
             );
         }
+    }
+
+    use super::with_privacy_policy_hint;
+
+    /// A wallet error naming `privacyPolicy` (in any casing) gets the form-field hint
+    /// appended after the original message.
+    #[test]
+    fn privacy_policy_rejections_get_a_hint() {
+        crate::i18n::load_languages(&["en-US".parse().unwrap()]);
+        for msg in [
+            "Insufficient funds permitted by privacyPolicy",
+            "the privacypolicy parameter forbids this",
+        ] {
+            let hinted = with_privacy_policy_hint(msg.to_string());
+            assert!(hinted.starts_with(msg), "{hinted}");
+            assert!(hinted.len() > msg.len(), "{hinted}");
+        }
+    }
+
+    #[test]
+    fn other_errors_are_left_unhinted() {
+        let msg = "Insufficient funds, have 0.00, need 1.00".to_string();
+        assert_eq!(with_privacy_policy_hint(msg.clone()), msg);
     }
 }

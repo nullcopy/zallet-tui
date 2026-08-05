@@ -18,6 +18,28 @@ use serde_json::{Value, json};
 
 use crate::config::RpcAuth;
 
+/// Every RPC method the TUI can call.
+///
+/// `zallet-tui check` compares this list against the server's `rpc.discover` schema, so a
+/// Zallet release that drops or renames a method is caught explicitly rather than as a
+/// runtime failure. Keep it in sync with the methods used in this module.
+pub(crate) const REQUIRED_METHODS: [&str; 14] = [
+    "getwalletstatus",
+    "getwalletinfo",
+    "z_getbalances",
+    "z_gettotalbalance",
+    "z_listaccounts",
+    "z_getnewaccount",
+    "z_getaddressforaccount",
+    "z_listtransactions",
+    "walletpassphrase",
+    "walletlock",
+    "z_sendmany",
+    "z_sendfromaccount",
+    "z_getoperationstatus",
+    "z_getoperationresult",
+];
+
 /// Errors that can arise when building or using the TUI's RPC client.
 #[derive(Debug)]
 pub(crate) enum ClientError {
@@ -68,10 +90,14 @@ impl RpcError {
         self.code == -15
     }
 
-    /// Whether the wallet is still warming up (scanning/syncing) and cannot answer yet
-    /// (`LegacyCode::InWarmup`).
-    pub(crate) fn is_warming_up(&self) -> bool {
-        self.code == -28
+    /// Whether the wallet cannot answer yet because it is still syncing.
+    ///
+    /// Covers `LegacyCode::InWarmup` (`-28`, warming up / scanning), and the two codes
+    /// Zallet's global sync lock returns from balance and spend methods:
+    /// `ClientInInitialDownload` (`-10`, catching up to the chain tip) and
+    /// `ForbiddenBySafeMode` (`-2`, recovering from a chain reorganization).
+    pub(crate) fn is_unavailable_while_syncing(&self) -> bool {
+        matches!(self.code, -28 | -10 | -2)
     }
 }
 
@@ -202,6 +228,13 @@ impl WalletClient {
         }
     }
 
+    // --- Introspection ----------------------------------------------------------------
+
+    /// Fetches the server's OpenRPC schema (`rpc.discover`).
+    pub(crate) async fn discover(&self) -> CallResult<OpenRpcSchema> {
+        self.request("rpc.discover", ArrayParams::new()).await
+    }
+
     // --- Status & balances ------------------------------------------------------------
 
     pub(crate) async fn get_wallet_status(&self) -> CallResult<WalletStatus> {
@@ -271,6 +304,11 @@ impl WalletClient {
     // --- Sending ----------------------------------------------------------------------
 
     /// Submits a `z_sendmany`, returning the async operation id.
+    ///
+    /// This is the legacy send path, kept because it is the only method that can pay a
+    /// ZIP 320 (TEX) recipient — that takes two transactions, which the PCZT pipeline
+    /// behind `z_sendfromaccount` cannot express. All other sends use
+    /// [`Self::send_from_account`].
     pub(crate) async fn send_many(
         &self,
         from: &str,
@@ -279,18 +317,7 @@ impl WalletClient {
         memo: Option<&str>,
         privacy_policy: &str,
     ) -> CallResult<String> {
-        let mut recipient = serde_json::Map::new();
-        recipient.insert("address".into(), json!(to));
-        recipient.insert("amount".into(), json!(amount));
-        if let Some(memo) = memo {
-            // The wallet expects the memo as hex-encoded bytes, but the form captures it as
-            // human-readable text, so encode the UTF-8 bytes here.
-            recipient.insert(
-                "memo".into(),
-                json!(crate::format::hex_encode(memo.as_bytes())),
-            );
-        }
-        let recipients = Value::Array(vec![Value::Object(recipient)]);
+        let recipients = Value::Array(vec![recipient_object(to, amount, memo)]);
 
         // from, [recipient], minconf = 1, fee = null (ZIP-317 automatic), privacy_policy.
         self.request(
@@ -300,17 +327,84 @@ impl WalletClient {
         .await
     }
 
+    /// Submits a `z_sendfromaccount`, returning the broadcast transaction ids.
+    ///
+    /// Unlike `z_sendmany`, this spends directly from an account (by UUID) rather than
+    /// from an address, takes an explicit fund source (each source is isolating: it does
+    /// not reach into other funds), and completes synchronously — the call blocks through
+    /// proving and broadcast, so it must not be awaited on the UI event loop.
+    pub(crate) async fn send_from_account(
+        &self,
+        account_uuid: &str,
+        fund_source: &str,
+        to: &str,
+        amount: &str,
+        memo: Option<&str>,
+        privacy_policy: &str,
+    ) -> CallResult<SendResult> {
+        let recipients = Value::Array(vec![recipient_object(to, amount, memo)]);
+
+        // account, fund_source, [recipient], minconf = 1, privacy_policy (required).
+        self.request(
+            "z_sendfromaccount",
+            rpc_params![account_uuid, fund_source, recipients, 1, privacy_policy],
+        )
+        .await
+    }
+
     /// Polls the status of one async operation.
     pub(crate) async fn operation_status(&self, opid: &str) -> CallResult<Vec<OperationStatus>> {
         self.request("z_getoperationstatus", rpc_params![[opid]])
             .await
     }
+
+    /// Collects (and thereby removes) one finished async operation.
+    ///
+    /// The wallet's operation queue is bounded: uncollected finished operations become
+    /// eviction candidates once the queue fills, and a queue full of *unfinished*
+    /// operations rejects new sends outright. Collecting each operation once it reaches a
+    /// terminal status keeps the queue clear.
+    pub(crate) async fn operation_result(&self, opid: &str) -> CallResult<Vec<OperationStatus>> {
+        self.request("z_getoperationresult", rpc_params![[opid]])
+            .await
+    }
+}
+
+/// Builds one entry of a send's `amounts`/`recipients` parameter.
+///
+/// The wallet rejects unknown keys in these objects (`deny_unknown_fields`), so only the
+/// three defined keys are ever set, and `memo` only when present.
+fn recipient_object(to: &str, amount: &str, memo: Option<&str>) -> Value {
+    let mut recipient = serde_json::Map::new();
+    recipient.insert("address".into(), json!(to));
+    recipient.insert("amount".into(), json!(amount));
+    if let Some(memo) = memo {
+        // The wallet expects the memo as hex-encoded bytes, but the form captures it as
+        // human-readable text, so encode the UTF-8 bytes here.
+        recipient.insert(
+            "memo".into(),
+            json!(crate::format::hex_encode(memo.as_bytes())),
+        );
+    }
+    Value::Object(recipient)
 }
 
 // --- Response types -------------------------------------------------------------------
 //
 // These mirror the JSON shapes produced by the wallet RPC. They are intentionally
 // tolerant: unknown fields are ignored, and optional fields are modelled as `Option`.
+
+/// The subset of an OpenRPC schema document (`rpc.discover`) the TUI cares about.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct OpenRpcSchema {
+    #[serde(default)]
+    pub(crate) methods: Vec<OpenRpcMethod>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct OpenRpcMethod {
+    pub(crate) name: String,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WalletStatus {
@@ -321,6 +415,12 @@ pub(crate) struct WalletStatus {
     pub(crate) fully_synced_height: Option<u32>,
     #[serde(default)]
     pub(crate) sync_work_remaining: Option<SyncWorkRemaining>,
+    /// Whether the wallet's global sync lock is engaged, meaning balance and spend
+    /// methods will fail until the wallet catches up to the chain tip.
+    ///
+    /// Absent on Zallet releases up to v0.1.0-beta.2; present on later versions.
+    #[serde(default)]
+    pub(crate) locked: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -369,27 +469,39 @@ pub(crate) struct Balances {
 pub(crate) struct AccountBalance {
     pub(crate) account_uuid: String,
     #[serde(default)]
-    pub(crate) transparent: Option<PoolBalance>,
+    pub(crate) transparent: Option<TransparentBalance>,
     #[serde(default)]
     pub(crate) sapling: Option<PoolBalance>,
     #[serde(default)]
     pub(crate) orchard: Option<PoolBalance>,
     #[serde(default)]
+    pub(crate) ironwood: Option<PoolBalance>,
+    #[serde(default)]
     pub(crate) total: Option<PoolBalance>,
 }
 
 impl AccountBalance {
-    /// Spendable balance in the transparent pool, in zatoshi.
+    /// Spendable balance in the transparent pool (regular and coinbase), in zatoshi.
     pub(crate) fn transparent_zat(&self) -> i64 {
-        spendable(self.transparent.as_ref())
+        self.transparent
+            .as_ref()
+            .map_or(0, TransparentBalance::spendable_zat)
     }
     /// Spendable balance in the Sapling pool, in zatoshi.
     pub(crate) fn sapling_zat(&self) -> i64 {
         spendable(self.sapling.as_ref())
     }
     /// Spendable balance in the Orchard pool, in zatoshi.
+    ///
+    /// Once NU6.3 (Ironwood) is active, the Orchard pool is sealed: funds received at
+    /// Orchard receivers land in the Ironwood pool instead, so this balance can only
+    /// shrink as it is spent or migrated.
     pub(crate) fn orchard_zat(&self) -> i64 {
         spendable(self.orchard.as_ref())
+    }
+    /// Spendable balance in the Ironwood pool, in zatoshi.
+    pub(crate) fn ironwood_zat(&self) -> i64 {
+        spendable(self.ironwood.as_ref())
     }
 
     /// The account's not-yet-spendable (pending) balance across all pools, in zatoshi.
@@ -405,6 +517,26 @@ impl AccountBalance {
 /// The spendable zatoshi in a pool, or `0` if the pool is absent.
 fn spendable(pool: Option<&PoolBalance>) -> i64 {
     pool.map_or(0, PoolBalance::spendable_zat)
+}
+
+/// The transparent portion of an account balance.
+///
+/// Unlike the shielded pools, `z_getbalances` splits transparent funds into `regular` and
+/// `coinbase` buckets (each a category map like the shielded pools), so that coinbase
+/// outputs — which have their own spendability rules — can be reported separately.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct TransparentBalance {
+    #[serde(default)]
+    pub(crate) regular: Option<PoolBalance>,
+    #[serde(default)]
+    pub(crate) coinbase: Option<PoolBalance>,
+}
+
+impl TransparentBalance {
+    /// The spendable balance across the regular and coinbase buckets, in zatoshi.
+    pub(crate) fn spendable_zat(&self) -> i64 {
+        spendable(self.regular.as_ref()) + spendable(self.coinbase.as_ref())
+    }
 }
 
 /// A per-pool (or whole-account `total`) balance, keyed by spendability category.
@@ -546,8 +678,35 @@ pub(crate) struct WalletTx {
     pub(crate) fee_paid: Option<i64>,
     #[serde(default)]
     pub(crate) block_time: Option<i64>,
+    /// The block time as an RFC 3339 datetime string, when mined.
+    #[serde(default)]
+    pub(crate) block_datetime: Option<String>,
     #[serde(default)]
     pub(crate) expired_unmined: bool,
+}
+
+/// The result of a completed send: the transaction ids that were broadcast.
+///
+/// Returned directly by `z_sendfromaccount`, and as the `result` of a successful
+/// `z_sendmany` operation. `txid` is only present when the payment took a single
+/// transaction; `txids` always lists every transaction.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct SendResult {
+    #[serde(default)]
+    pub(crate) txid: Option<String>,
+    #[serde(default)]
+    pub(crate) txids: Vec<String>,
+}
+
+impl SendResult {
+    /// A display string for the broadcast transaction id(s).
+    pub(crate) fn txids_label(&self) -> String {
+        match &self.txid {
+            Some(txid) => txid.clone(),
+            None if self.txids.is_empty() => crate::fl!("tui-value-unknown"),
+            None => self.txids.join(", "),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -659,13 +818,19 @@ mod tests {
         assert_eq!(handle.join().unwrap(), None);
     }
 
-    /// Regression test against a real `z_getbalances` response: pools are nested objects
-    /// (`{"spendable": {"valueZat": N}}`) and absent when empty.
+    /// Regression test against a real `z_getbalances` response (Zallet v0.1.0-beta.2):
+    /// pools are nested objects (`{"spendable": {"valueZat": N}}`) and absent when empty,
+    /// the `ironwood` pool appears alongside `sapling`/`orchard` once NU6.3 is active, and
+    /// `transparent` is split into `regular`/`coinbase` buckets.
     #[test]
     fn balances_deserialize_from_real_response() {
         let json = r#"{"accounts":[
             {"account_uuid":"4e7543e5-1c82-4b5b-8c7e-1113383b763e","total":{"spendable":{"valueZat":0}}},
-            {"account_uuid":"5f24cb93-dcbc-4915-b815-c6ddfa018b86","orchard":{"spendable":{"valueZat":10000000000}},"total":{"spendable":{"valueZat":10000000000}}}
+            {"account_uuid":"5f24cb93-dcbc-4915-b815-c6ddfa018b86",
+             "transparent":{"regular":{"spendable":{"valueZat":50}},"coinbase":{"spendable":{"valueZat":25}}},
+             "orchard":{"spendable":{"valueZat":10000000000}},
+             "ironwood":{"spendable":{"valueZat":300}},
+             "total":{"spendable":{"valueZat":10000000375}}}
         ]}"#;
 
         let balances: Balances = serde_json::from_str(json).expect("parse z_getbalances response");
@@ -674,13 +839,22 @@ mod tests {
         let empty = &balances.accounts[0];
         assert_eq!(empty.transparent_zat(), 0);
         assert_eq!(empty.orchard_zat(), 0);
+        assert_eq!(empty.ironwood_zat(), 0);
         assert_eq!(empty.total_zat(), 0);
 
         let funded = &balances.accounts[1];
         assert_eq!(funded.orchard_zat(), 10_000_000_000);
-        assert_eq!(funded.total_zat(), 10_000_000_000);
-        assert_eq!(funded.transparent_zat(), 0);
+        assert_eq!(funded.ironwood_zat(), 300);
+        assert_eq!(funded.transparent_zat(), 75);
         assert_eq!(funded.sapling_zat(), 0);
+        assert_eq!(funded.total_zat(), 10_000_000_375);
+    }
+
+    /// An empty wallet's `z_getbalances` response omits the `accounts` key entirely.
+    #[test]
+    fn balances_tolerate_missing_accounts_key() {
+        let balances: Balances = serde_json::from_str("{}").expect("parse empty response");
+        assert!(balances.accounts.is_empty());
     }
 
     /// Non-`spendable` categories are summed into the pending total, and the grand total
@@ -700,5 +874,38 @@ mod tests {
         assert_eq!(account.orchard_zat(), 100); // pool columns show spendable only
         assert_eq!(account.pending_total_zat(), 40);
         assert_eq!(account.total_zat(), 140); // spendable + pending
+    }
+
+    /// The txid label prefers the single `txid`, joins a multi-transaction `txids` list
+    /// (e.g. a ZIP 320 TEX payment), and falls back to a placeholder when both are empty.
+    #[test]
+    fn send_result_txid_labels() {
+        crate::i18n::load_languages(&["en-US".parse().unwrap()]);
+        let result = |txid: Option<&str>, txids: &[&str]| SendResult {
+            txid: txid.map(str::to_string),
+            txids: txids.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(result(Some("aa"), &["aa"]).txids_label(), "aa");
+        assert_eq!(result(None, &["aa", "bb"]).txids_label(), "aa, bb");
+        assert_eq!(
+            result(None, &[]).txids_label(),
+            crate::fl!("tui-value-unknown")
+        );
+    }
+
+    /// Exactly the warmup (`-28`) and global-sync-lock (`-10`, `-2`) codes count as
+    /// "still syncing"; other wallet errors must keep surfacing as errors.
+    #[test]
+    fn syncing_codes_are_recognized() {
+        let err = |code| RpcError {
+            code,
+            message: String::new(),
+        };
+        for code in [-28, -10, -2] {
+            assert!(err(code).is_unavailable_while_syncing(), "{code}");
+        }
+        for code in [0, -1, -5, -13, -15, -32601] {
+            assert!(!err(code).is_unavailable_while_syncing(), "{code}");
+        }
     }
 }

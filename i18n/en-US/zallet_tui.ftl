@@ -64,6 +64,7 @@ tui-toast-account-created = Created account '{$name}'
 tui-toast-send-completed = Send completed
 tui-toast-send-cancelled = Send cancelled
 tui-err-send-failed = Send failed: {$error}
+tui-err-send-op-lost = Operation {$opid} is no longer tracked by the wallet; check the Transactions view for the outcome.
 tui-err-unknown = unknown error
 
 # Logs view (toasts / placeholders)
@@ -163,15 +164,18 @@ tui-bal-header-account = Account
 tui-bal-header-transparent = Transparent
 tui-bal-header-sapling = Sapling
 tui-bal-header-orchard = Orchard
+tui-bal-header-ironwood = Ironwood
 tui-bal-header-pending = Pending
 tui-bal-header-total = Total
 tui-bal-title = Balances  (minconf = {$minconf}  [+/-] to change)
+tui-bal-orchard-sealed = ⚠ The Orchard pool is sealed (NU6.3): these funds can only move to your own Ironwood pool, and the crossing amount is public (needs the AllowRevealedAmounts policy).
 tui-bal-syncing = Balances are not available yet — the wallet is still syncing.
 tui-bal-empty = No balances to display.
 
 # Transactions view
 tui-tx-title = Transactions  (page {$page}, [ / ] to page · experimental)
 tui-tx-empty = No transactions to display.
+tui-tx-error = Could not load transactions (z_listtransactions is experimental): {$error}
 tui-tx-unmined = unmined
 tui-tx-detail-title = Detail
 tui-tx-field-txid = txid
@@ -186,6 +190,7 @@ tui-tx-select = Select a transaction.
 # Send view
 tui-send-cancelled = Send cancelled
 tui-send-err-no-accounts = No accounts available to send from
+tui-send-err-syncing = Wallet is still catching up to the chain tip; sending is unavailable until it is synced
 tui-send-err-no-source = Select a source account
 tui-send-err-no-spendable = Selected account has no spendable address
 tui-send-err-recipient-required = Recipient address is required
@@ -193,7 +198,16 @@ tui-send-err-amount-required = Amount is required
 tui-send-err-amount-nan = Amount must be a number
 tui-send-err-no-source-selected = No source account selected
 tui-send-submitted = Submitted (op {$opid})
+tui-send-err-in-flight = A send is already in progress; wait for it to finish
+tui-toast-send-started = Send submitted; building and proving the transaction…
+tui-err-send-task-failed = The send task ended unexpectedly; check the Transactions view for the outcome.
+tui-send-sending = Sending…
+tui-send-sending-hint = Building, proving, and broadcasting can take a while; the wallet confirms when done.
 tui-send-from = From
+tui-send-fund-source = Funds
+tui-send-fund-orchard = Shielded (Orchard + Ironwood)
+tui-send-fund-sapling = Shielded (Sapling)
+tui-send-fund-transparent = Transparent
 tui-send-to = To
 tui-send-amount = Amount (ZEC)
 tui-send-memo = Memo
@@ -202,6 +216,7 @@ tui-send-review = [ Review & send ]
 tui-send-no-spendable-suffix = (no spendable address)
 tui-send-fees-note = Fees are computed automatically (ZIP-317).
 tui-send-privacy-warning = ⚠ This policy reduces privacy. Only proceed if you understand the implications.
+tui-send-policy-hint = Tip: since NU6.3, spending sealed Orchard funds crosses into Ironwood and reveals the amount — select AllowRevealedAmounts (or weaker) in the Privacy policy field to allow it.
 tui-send-hint-editing = EDITING — type to enter text · Enter/Esc to finish
 tui-send-hint-text = ↑↓ move · Enter to edit this field · Esc to tabs
 tui-send-hint-submit = ↑↓ move · Enter to review & send · Esc to tabs
@@ -210,6 +225,7 @@ tui-send-title = Send
 tui-send-operation-title = Operation
 tui-send-confirm = Confirm send?
 tui-send-confirm-summary = {$amount} ZEC from {$from} → {$to}
+tui-send-confirm-tex = TEX recipient (ZIP 320): sent from the account's address via z_sendmany; the Funds selection does not apply.
 tui-send-confirm-hint = [y] yes   [n] no
 tui-send-queued = queued
 tui-send-operation = Operation {$opid}
