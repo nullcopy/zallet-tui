@@ -637,6 +637,9 @@ pub(crate) struct WalletTx {
     pub(crate) fee_paid: Option<i64>,
     #[serde(default)]
     pub(crate) block_time: Option<i64>,
+    /// The block time as an RFC 3339 datetime string, when mined.
+    #[serde(default)]
+    pub(crate) block_datetime: Option<String>,
     #[serde(default)]
     pub(crate) expired_unmined: bool,
 }

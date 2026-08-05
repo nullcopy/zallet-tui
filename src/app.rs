@@ -521,12 +521,23 @@ impl App {
         {
             Ok(Ok(txs)) => {
                 self.data.transactions = txs;
+                self.transactions.error = None;
                 if self.transactions.selected >= self.data.transactions.len() {
                     self.transactions.selected = self.data.transactions.len().saturating_sub(1);
                 }
             }
-            // z_listtransactions is experimental; don't spam errors on empty wallets.
-            Ok(Err(_)) => self.data.transactions.clear(),
+            // The wallet is still syncing; an empty list with no error is the right state.
+            Ok(Err(e)) if e.is_unavailable_while_syncing() => {
+                self.data.transactions.clear();
+                self.transactions.error = None;
+            }
+            // z_listtransactions is experimental, so don't spam toasts on every tick;
+            // record the error for the view to display in place of the list instead of
+            // silently showing an empty history.
+            Ok(Err(e)) => {
+                self.data.transactions.clear();
+                self.transactions.error = Some(e.to_string());
+            }
             Err(e) => self.error(e.to_string()),
         }
     }

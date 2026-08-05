@@ -175,6 +175,7 @@ tui-bal-empty = No balances to display.
 # Transactions view
 tui-tx-title = Transactions  (page {$page}, [ / ] to page · experimental)
 tui-tx-empty = No transactions to display.
+tui-tx-error = Could not load transactions (z_listtransactions is experimental): {$error}
 tui-tx-unmined = unmined
 tui-tx-detail-title = Detail
 tui-tx-field-txid = txid

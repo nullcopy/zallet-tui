@@ -19,6 +19,8 @@ pub(crate) struct TransactionsState {
     pub(crate) selected: usize,
     /// The offset of the current page, in transactions, from the most recent.
     pub(crate) offset: u32,
+    /// The last `z_listtransactions` failure, shown in place of the list.
+    pub(crate) error: Option<String>,
 }
 
 pub(crate) async fn on_key(app: &mut App, key: KeyEvent) {
@@ -65,6 +67,15 @@ pub(crate) fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
 fn render_list(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let page = app.transactions.offset / TX_PAGE_SIZE + 1;
     let title = format!(" {} ", crate::fl!("tui-tx-title", page = page));
+
+    if let Some(error) = &app.transactions.error {
+        let p = Paragraph::new(crate::fl!("tui-tx-error", error = error.clone()))
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(p, area);
+        return;
+    }
 
     if app.data.transactions.is_empty() {
         let p = Paragraph::new(crate::fl!("tui-tx-empty"))
@@ -141,8 +152,19 @@ fn render_detail(app: &App, frame: &mut Frame<'_>, area: Rect) {
             if let Some(fee) = tx.fee_paid {
                 lines.push(field(&crate::fl!("tui-tx-field-fee"), format_zat(fee)));
             }
-            if let Some(t) = tx.block_time {
-                lines.push(field(&crate::fl!("tui-tx-field-block-time"), t.to_string()));
+            // Prefer the RFC 3339 datetime the wallet now reports; fall back to the raw
+            // Unix timestamp for older servers.
+            match (&tx.block_datetime, tx.block_time) {
+                (Some(datetime), _) => {
+                    lines.push(field(
+                        &crate::fl!("tui-tx-field-block-time"),
+                        datetime.clone(),
+                    ));
+                }
+                (None, Some(t)) => {
+                    lines.push(field(&crate::fl!("tui-tx-field-block-time"), t.to_string()));
+                }
+                (None, None) => {}
             }
             if let Some(uuid) = &tx.account_uuid {
                 lines.push(field(&crate::fl!("tui-tx-field-account"), uuid.clone()));
