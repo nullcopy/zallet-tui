@@ -148,10 +148,10 @@ fn is_valid_amount(s: &str) -> bool {
     if !is_digits(whole) {
         return false;
     }
-    if let Some(frac) = frac {
-        if frac.len() > 8 || !is_digits(frac) {
-            return false;
-        }
+    if let Some(frac) = frac
+        && (frac.len() > 8 || !is_digits(frac))
+    {
+        return false;
     }
 
     // Reject zero (e.g. "0", "0.0"): the wallet will not send it.
