@@ -98,9 +98,8 @@ control verbosity.
 
 ## License
 
-Licensed under either of
+This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+Earlier versions, and portions derived from third-party work, were released
+under the MIT or Apache-2.0 licenses. Those notices are retained in
+[LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
