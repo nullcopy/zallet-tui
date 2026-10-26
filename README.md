@@ -98,7 +98,7 @@ control verbosity.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
+This project is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
 
 Earlier versions, and portions derived from third-party work, were released
 under the MIT or Apache-2.0 licenses. Those notices are retained in
